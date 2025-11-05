@@ -1,4 +1,4 @@
-# Serper Search MCP Server v2.0.0 - Enterprise Edition
+# Serper Search MCP Server v2.0.1 - Enterprise Edition
 
 🚀 **Enterprise-grade Google search MCP server** with **dual architecture**: JavaScript for integration + TypeScript for enterprise development.
 
