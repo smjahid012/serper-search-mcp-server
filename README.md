@@ -3,8 +3,8 @@
 🚀 **Enterprise-grade Google search MCP server** with **dual architecture**: JavaScript for integration + TypeScript for enterprise development.
 
 👨‍💻 **Author:** SMJAHID from SMLabs01
-📦 **NPM:** `@modelcontextprotocol/server-serper-search`
-🐳 **Docker:** `smjahid/server-serper-search`
+📦 **NPM:** [`serper-search-mcp`](https://www.npmjs.com/package/serper-search-mcp)
+🐳 **Docker:** [`smjahid/server-serper-search`](https://hub.docker.com/r/smjahid/server-serper-search)
 🔧 **Architecture:** JavaScript (primary) + TypeScript (enterprise modular design)
 
 ---
@@ -332,7 +332,7 @@ The server supports all major Google search types through the Serper API:
 
 ## Usage Scenarios
 
-With these comprehensive search capabilities, your Serper MCP server can be used for:
+With these comprehensive search capabilities, Serper MCP server can be used for:
 
 ### 🤖 **AI & Machine Learning**
 - **Dataset Collection**: Gather images for training computer vision models
@@ -396,8 +396,6 @@ For issues and questions:
 ```
 JavaScript (Primary): index.js - Single file deployment
 TypeScript (Enterprise): src/ (6 modules) - Modular architecture
-Docker: smjahid/server-serper-search:2.0.0
-NPM: @modelcontextprotocol/server-serper-search
 ```
 
 **⬆️ Migration from v1.x:**
