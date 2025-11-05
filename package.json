@@ -1,0 +1,60 @@
+{
+  "name": "serper-search-mcp",
+  "version": "2.0.1",
+  "description": "MCP server for Serper API (Google search results) with multi-transport support",
+  "main": "index.js",
+  "bin": {
+    "serper-search-mcp": "index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "SERPER_API_KEY=test npm run build && node dist/index.js",
+    "http": "SERPER_MCP_TRANSPORT=http npm run build && node dist/index.js",
+    "stdio": "SERPER_MCP_TRANSPORT=stdio npm run build && node dist/index.js",
+    "docker:build": "docker build -t smjahid/server-serper-search .",
+    "docker:run": "docker run -i --rm -e SERPER_API_KEY smjahid/server-serper-search",
+    "compose:up": "docker-compose up",
+    "compose:dev": "docker-compose --profile dev up",
+    "help": "node dist/index.js --help",
+    "clean": "rm -rf dist",
+    "rebuild": "npm run clean && npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "serper",
+    "search",
+    "google",
+    "api"
+  ],
+  "author": "SMJAHID from SMLabs01",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.22",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/smjahid012/serper-search-mcp-server.git"
+  },
+  "homepage": "https://github.com/smjahid012/serper-search-mcp-server#readme",
+  "bugs": {
+    "url": "https://github.com/smjahid012/serper-search-mcp-server/issues"
+  },
+  "files": [
+    "dist/",
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

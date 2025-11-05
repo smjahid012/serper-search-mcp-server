@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "serper-search": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "SERPER_API_KEY=YOUR_API_KEY_HERE",
+        "smjahid/server-serper-search:2.0.0"
+      ]
+    }
+  }
+}
