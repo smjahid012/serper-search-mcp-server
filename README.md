@@ -103,14 +103,14 @@ node dist/index.js --help
 ```json
 {
   "mcpServers": {
-    "serper-search": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-serper-search"],
-      "env": {
-        "SERPER_API_KEY": "your_actual_api_key_here"
-      }
-    }
-  }
+        "serper-search": {
+          "command": "npx",
+          "args": ["-y", "serper-search-mcp"],
+          "env": {
+            "SERPER_API_KEY": "9a2cb7de3339dd3c175042c86dab67d5ce7ed157"
+          }
+        }
+      }       
 }
 ```
 
