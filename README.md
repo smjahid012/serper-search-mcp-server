@@ -107,7 +107,7 @@ node dist/index.js --help
           "command": "npx",
           "args": ["-y", "serper-search-mcp"],
           "env": {
-            "SERPER_API_KEY": "9a2cb7de3339dd3c175042c86dab67d5ce7ed157"
+            "SERPER_API_KEY": "Your Serper Api Key"
           }
         }
       }       
