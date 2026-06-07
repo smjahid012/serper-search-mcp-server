@@ -89,7 +89,7 @@ node index.js
 | **Claude Desktop (Win)** | `%APPDATA%\Claude\claude_desktop_config.json` |
 | **Cursor** | `~/.cursor/mcp.json` |
 | **Windsurf** | `~/.codeium/windsurf/mcp_config.json` |
-| **KiloCode** | MCP section inside extension settings |
+| **KiloCode** | `~/.config/kilo/kilo.json` (global) or `<project>/kilo.json` (project) |
 | **n8n** | MCP Client node → Server URL |
 
 ---
