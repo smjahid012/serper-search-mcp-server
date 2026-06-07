@@ -6,7 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/serper-search-mcp?color=blue&logo=npm)](https://www.npmjs.com/package/serper-search-mcp)
 [![npm downloads](https://img.shields.io/npm/dm/serper-search-mcp?color=green)](https://www.npmjs.com/package/serper-search-mcp)
-[![Docker Pulls](https://img.shields.io/docker/pulls/smjahid/serper-search-mcp?logo=docker)](https://hub.docker.com/r/smjahid/serper-search-mcp)
+[![Docker Pulls](https://img.shields.io/docker/pulls/smjahid/server-serper-search?logo=docker)](https://hub.docker.com/r/smjahid/server-serper-search)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-purple)](https://modelcontextprotocol.io)
 
@@ -62,7 +62,7 @@ Add this to your MCP client config (paths listed below), then restart.
   "mcpServers": {
     "serper-search": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "SERPER_API_KEY=your_key", "smjahid/serper-search-mcp:3"],
+      "args": ["run", "-i", "--rm", "-e", "SERPER_API_KEY=your_key", "smjahid/server-serper-search:3"],
       "env": {}
     }
   }
@@ -203,16 +203,16 @@ Returns: business name, category, address, phone, website, star rating + review 
 ## Environment variables
 
 | Variable | Required | Default | Description |
-|---|---|---|---|---|
+|---|---|---|---|
 | `SERPER_API_KEY` | ✅ | — | Your Serper API key |
 | `SERPER_MCP_TRANSPORT` | ❌ | `stdio` | `stdio` or `http` |
 | `SERPER_MCP_PORT` | ❌ | `8080` | HTTP port |
 | `SERPER_MCP_HOST` | ❌ | `0.0.0.0` | HTTP host |
 | `SERPER_MCP_LOG_LEVEL` | ❌ | `info` | Logging verbosity |
 | `OPENROUTER_API_KEY` | ❌ | — | LLM key for `deep_research` (free at openrouter.ai) |
-| `OPENROUTER_MODEL` | ❌ | `google/gemini-2.0-flash-exp:free` | OpenRouter model override |
+| `OPENROUTER_MODEL` | ❌ | `google/gemini-3.1-flash-lite:free` | OpenRouter model override |
 | `GEMINI_API_KEY` | ❌ | — | LLM key for `deep_research` (free at ai.google.dev) |
-| `GEMINI_MODEL` | ❌ | `gemini-2.0-flash` | Gemini model override |
+| `GEMINI_MODEL` | ❌ | `gemini-3.1-flash-lite` | Gemini model override |
 
 ---
 
@@ -258,17 +258,14 @@ Runs multi-step AI research using your own LLM key. No LLM data leaves your envi
 
 **Output:** Structured markdown report with inline citations + Sources section.
 
-**Supported LLMs via env:**
+**Supported LLMs via env (all vars documented in the [table above](#environment-variables)):**
 
-```bash
-# OpenRouter (free tier available)
-OPENROUTER_API_KEY=sk-or-...
-OPENROUTER_MODEL=google/gemini-2.0-flash-exp:free  # default
-
-# Gemini (free tier available)
-GEMINI_API_KEY=AIza...
-GEMINI_MODEL=gemini-2.0-flash  # default
-```
+| Provider | Variable | Default |
+|---|---|---|
+| OpenRouter | `OPENROUTER_API_KEY` | — |
+| | `OPENROUTER_MODEL` | `google/gemini-3.1-flash-lite:free` |
+| Google Gemini | `GEMINI_API_KEY` | — |
+| | `GEMINI_MODEL` | `gemini-3.1-flash-lite` |
 
 ---
 
