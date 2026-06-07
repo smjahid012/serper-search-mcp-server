@@ -5,6 +5,7 @@
  */
 
 import { SerperMCPServer } from './server/SerperMCPServer.js';
+import { version } from '../package.json';
 
 function parseArgs(): Record<string, string> {
   const argv = process.argv.slice(2);
@@ -24,7 +25,7 @@ async function main() {
 
   if ('help' in flags) {
     console.log(`
-Serper Search MCP Server v3.0.0 — SMLabs AI
+Serper Search MCP Server v${version} — SMLabs AI
 
 Usage:
   npx serper-search-mcp [options]

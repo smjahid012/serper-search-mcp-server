@@ -18,6 +18,7 @@ import { SearchTools } from '../tools/SearchTools.js';
 import { ResultFormatter } from '../utils/ResultFormatter.js';
 import { runDeepResearch, ResearchDepth } from '../tools/DeepResearch.js';
 import { buildRAGContext } from '../tools/RAGContext.js';
+import { version } from '../../package.json';
 
 const SEARCH_TYPE_MAP: Record<string, SearchType> = {
   search_web:      'web',
@@ -46,7 +47,7 @@ export class SerperMCPServer {
 
     this.api = new SerperAPI(this.config.apiKey);
     this.server = new Server(
-      { name: 'serper-search-mcp', version: '3.0.0' },
+      { name: 'serper-search-mcp', version },
       { capabilities: { tools: {} } }
     );
 
@@ -143,6 +144,6 @@ export class SerperMCPServer {
 
   async run(): Promise<void> {
     await this.server.connect(new StdioServerTransport());
-    console.error('Serper Search MCP Server v3.0.0 — SMLabs AI');
+    console.error(`Serper Search MCP Server v${version} — SMLabs AI`);
   }
 }

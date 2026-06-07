@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
- * Serper Search MCP Server v3.0.0 — SMLabs AI
+ * Serper Search MCP Server — SMLabs AI
  * Zero-build JavaScript entry point (works with npx, Docker, direct node)
  * github.com/smjahid012/serper-search-mcp-server
  */
 
 'use strict';
 
-const { Server }             = require('@modelcontextprotocol/sdk/server/index.js');
+const { version } = require('./package.json');
+const { Server }  = require('@modelcontextprotocol/sdk/server/index.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const {
   CallToolRequestSchema,
@@ -314,7 +315,7 @@ class SerperMCPServer {
   constructor(apiKey) {
     this.apiKey = apiKey;
     this.server = new Server(
-      { name: 'serper-search-mcp', version: '3.0.0' },
+      { name: 'serper-search-mcp', version },
       { capabilities: { tools: {} } }
     );
     this._setup();
@@ -365,7 +366,7 @@ class SerperMCPServer {
 
   async run() {
     await this.server.connect(new StdioServerTransport());
-    console.error('Serper Search MCP Server v3.0.0 — SMLabs AI');
+    console.error(`Serper Search MCP Server v${version} — SMLabs AI`);
   }
 }
 
@@ -388,7 +389,7 @@ if (require.main === module) {
 
   if ('help' in flags) {
     console.log(`
-Serper Search MCP Server v3.0.0 — SMLabs AI
+Serper Search MCP Server v${version} — SMLabs AI
 
 Usage: npx serper-search-mcp [options]
 
