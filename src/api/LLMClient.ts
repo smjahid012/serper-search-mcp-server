@@ -22,14 +22,14 @@ function detectProvider(): LLMConfig | null {
     return {
       provider: 'openrouter',
       apiKey: process.env.OPENROUTER_API_KEY,
-      model: process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-exp:free',
+      model: process.env.OPENROUTER_MODEL || 'google/gemini-3.1-flash-lite:free',
     };
   }
   if (process.env.GEMINI_API_KEY) {
     return {
       provider: 'gemini',
       apiKey: process.env.GEMINI_API_KEY,
-      model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
+      model: process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite',
     };
   }
   return null;
