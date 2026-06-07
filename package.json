@@ -1,0 +1,69 @@
+{
+  "name": "serper-search-mcp",
+  "version": "3.0.0",
+  "description": "MCP server for Serper API — Google web, image, video, news, shopping, and places search for AI agents",
+  "main": "index.js",
+  "bin": {
+    "serper-search-mcp": "index.js"
+  },
+  "scripts": {
+    "build":        "tsc",
+    "start":        "node index.js",
+    "dev":          "ts-node src/index.ts",
+    "http":         "SERPER_MCP_TRANSPORT=http node index.js",
+    "docker:build": "docker build -t smjahid/serper-search-mcp .",
+    "docker:run":   "docker run -i --rm -e SERPER_API_KEY smjahid/serper-search-mcp",
+    "help":         "node index.js --help",
+    "clean":        "rm -rf dist",
+    "rebuild":      "npm run clean && npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "serper",
+    "google-search",
+    "search",
+    "web-search",
+    "image-search",
+    "news-search",
+    "video-search",
+    "shopping-search",
+    "places-search",
+    "google-maps",
+    "ai-agent",
+    "llm-tools",
+    "claude",
+    "cursor",
+    "anthropic",
+    "smlabs"
+  ],
+  "author": "smjahid012 (SMLabs AI) <https://smlabsai.com>",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/smjahid012/serper-search-mcp-server.git"
+  },
+  "homepage": "https://github.com/smjahid012/serper-search-mcp-server#readme",
+  "bugs": {
+    "url": "https://github.com/smjahid012/serper-search-mcp-server/issues"
+  },
+  "files": [
+    "dist/",
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
