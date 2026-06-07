@@ -46,7 +46,8 @@ This MCP server wraps the [Serper API](https://serper.dev) (Google Search result
       "command": "npx",
       "args": ["-y", "serper-search-mcp"],
       "env": {
-        "SERPER_API_KEY": "your_api_key_here"
+        "SERPER_API_KEY": "${SERPER_API_KEY}",
+        "GEMINI_API_KEY": "${GEMINI_API_KEY}"
       }
     }
   }
