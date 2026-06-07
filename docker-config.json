@@ -7,8 +7,10 @@
         "-i",
         "--rm",
         "-e",
-        "SERPER_API_KEY=${SERPER_API_KEY}",
-        "smjahid/serper-search-mcp:3"
+        "SERPER_API_KEY",
+        "-e",
+        "GEMINI_API_KEY",
+        "smjahid/server-serper-search:3"
       ]
     }
   }

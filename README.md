@@ -62,11 +62,22 @@ Add this to your MCP client config (paths listed below), then restart.
   "mcpServers": {
     "serper-search": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "SERPER_API_KEY=your_key", "smjahid/server-serper-search:3"],
-      "env": {}
+      "args": ["run", "-i", "--rm", "-e", "SERPER_API_KEY", "-e", "GEMINI_API_KEY", "smjahid/server-serper-search:3"],
+      "env": {
+        "SERPER_API_KEY": "your_key_here",
+        "GEMINI_API_KEY": "your_gemini_key_here"
+      }
     }
   }
 }
+```
+
+Or run directly:
+```bash
+docker run -i --rm \
+  -e SERPER_API_KEY=your_key \
+  -e GEMINI_API_KEY=your_gemini_key \
+  smjahid/server-serper-search:3
 ```
 
 ### Option 3 — Local clone
@@ -76,8 +87,11 @@ git clone https://github.com/smjahid012/serper-search-mcp-server.git
 cd serper-search-mcp-server
 npm install
 export SERPER_API_KEY="your_key"
+export GEMINI_API_KEY="your_gemini_key"
 node index.js
 ```
+
+> **💡 AI-powered research is free.** `deep_research` uses Gemini's free tier by default. Set `GEMINI_API_KEY` above to unlock it.
 
 ---
 
