@@ -21,7 +21,7 @@ services:
       start_period: 10s
     labels:
       - "mcp.server.name=serper-search"
-      - "mcp.server.version=3.0.0"
+      - "mcp.server.version=3.0.3"
       - "mcp.server.author=smjahid012 (SMLabs AI)"
 
   # Development environment with hot reload
