@@ -38,7 +38,7 @@
     "smlabs"
   ],
   "author": "smjahid012 (SMLabs AI) <https://smlabsai.com>",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
   },

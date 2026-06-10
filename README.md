@@ -7,7 +7,7 @@
 [![npm version](https://img.shields.io/npm/v/serper-search-mcp?color=blue&logo=npm)](https://www.npmjs.com/package/serper-search-mcp)
 [![npm downloads](https://img.shields.io/npm/dm/serper-search-mcp?color=green)](https://www.npmjs.com/package/serper-search-mcp)
 [![Docker Pulls](https://img.shields.io/docker/pulls/smjahid/server-serper-search?logo=docker)](https://hub.docker.com/r/smjahid/server-serper-search)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-purple)](https://modelcontextprotocol.io)
 
 Built by [SMLabs AI](https://smlabsai.com) · [smjahid012](https://github.com/smjahid012)
@@ -438,6 +438,13 @@ export SERPER_API_KEY="your_key"
 node index.js   # test immediately, no build required
 ```
 
+---
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE)
+
+---
 
 <div align="center">
 
