@@ -438,13 +438,6 @@ export SERPER_API_KEY="your_key"
 node index.js   # test immediately, no build required
 ```
 
----
-
-## License
-
-MIT — see [LICENSE](LICENSE)
-
----
 
 <div align="center">
 
