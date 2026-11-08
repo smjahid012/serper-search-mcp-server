@@ -1,0 +1,47 @@
+# Dependencies & build output
+node_modules/
+dist/
+build/
+
+# Git & CI/CD
+.git/
+.github/
+.gitignore
+
+# Environment & secrets
+.env*
+*.log
+
+# Tests & coverage
+tests/
+test-results/
+coverage/
+*.lcov
+test-server.sh
+
+# Editors & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Documentation & planning (keep Docker image slim)
+*.md
+smdocs/
+.smagi/
+.codegraph/
+readme-luna.md
+AGENTS.md
+
+# Config files not needed in production container
+*.sh
+*.yml
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+npx-config.json
+docker-config.json
+docker-compose.yml
+temp/
+tmp/

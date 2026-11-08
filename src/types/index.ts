@@ -3,6 +3,8 @@
  * SMLabs AI — https://smlabsai.com
  */
 
+export type Verbosity = 'auto' | 'compact' | 'standard' | 'full';
+
 export interface SearchOptions {
   query: string;
   num_results?: number;
@@ -14,6 +16,13 @@ export interface SearchOptions {
   summary?: boolean;
   page?: number;
   autocorrect?: boolean;
+  // v3.1 token knobs: verbosity controls display density (not credits),
+  // fields/max_chars bound output for agents, provider selects backend.
+  verbosity?: Verbosity;
+  fields?: string[];
+  max_chars?: number;
+  snippets_only?: boolean;
+  provider?: string;
 }
 
 // ── Web / Organic ────────────────────────────────────────────────────────────
@@ -26,6 +35,10 @@ export interface OrganicResult {
   date?: string;
   attributes?: Record<string, string>;
   sitelinks?: Array<{ title: string; link: string }>;
+  // Scholar-only fields (present when the scholar endpoint is used)
+  publicationInfo?: string;
+  year?: number;
+  citedBy?: number;
 }
 
 export interface KnowledgeGraph {
@@ -113,6 +126,26 @@ export interface PlaceResult {
   website?: string;
   openingHours?: string[];
   position?: number;
+  cid?: string;
+  placeId?: string;
+}
+
+// ── Niche verticals (v3.2 sweep — Serper patents + autocomplete) ─────────────
+
+export interface PatentResult {
+  title: string;
+  link?: string;
+  snippet?: string;
+  publicationNumber?: string;
+  assignee?: string;
+  inventor?: string;
+  publicationDate?: string;
+  grantDate?: string;
+  position?: number;
+}
+
+export interface AutocompleteResult {
+  suggestion: string;
 }
 
 // ── Full API response ────────────────────────────────────────────────────────
@@ -136,7 +169,27 @@ export interface SerperAPIResponse {
   news?: NewsResult[];
   shopping?: ShoppingResult[];
   places?: PlaceResult[];
+  patents?: PatentResult[];
+  suggestions?: AutocompleteResult[] | string[];
   credits?: number;
+  provider?: string;
+  cache_hit?: boolean;
+}
+
+// ── Scrape ───────────────────────────────────────────────────────────────────
+
+export interface ScrapeOptions {
+  includeMarkdown?: boolean;
+  includeImages?: boolean;
+  includeLinks?: boolean;
+  includeVideos?: boolean;
+}
+
+export interface ScrapeResponse {
+  markdown?: string;
+  text?: string;
+  credits?: number;
+  [key: string]: unknown;
 }
 
 // ── Server config ────────────────────────────────────────────────────────────
@@ -147,6 +200,7 @@ export interface ServerConfig {
   port: number;
   host: string;
   logLevel: string;
+  authToken?: string;
 }
 
 export interface ToolDefinition {
@@ -159,4 +213,4 @@ export interface ToolDefinition {
   };
 }
 
-export type SearchType = 'web' | 'images' | 'videos' | 'news' | 'shopping' | 'places';
+export type SearchType = 'web' | 'images' | 'videos' | 'news' | 'shopping' | 'places' | 'scholar' | 'patents' | 'autocomplete';

@@ -1,5 +1,5 @@
 # Build stage
-FROM node:18-alpine AS builder
+FROM node:20-alpine AS builder
 
 # Create app directory
 WORKDIR /app
@@ -13,11 +13,18 @@ RUN npm ci
 # Copy source code
 COPY . .
 
-# Build the application (if using TypeScript)
-RUN npm run build 2>/dev/null || echo "No build step defined, using JavaScript"
+# Build the application: tsc -> dist/, then esbuild -> index.js bundle
+RUN npm run rebuild
 
 # Production stage
-FROM node:18-alpine AS production
+FROM node:20-alpine AS production
+
+LABEL org.opencontainers.image.title="serper-search-mcp" \
+      org.opencontainers.image.description="Serper Search MCP Server — Universal Search Gateway for AI Agents" \
+      org.opencontainers.image.source="https://github.com/smjahid012/serper-search-mcp-server" \
+      org.opencontainers.image.url="https://github.com/smjahid012/serper-search-mcp-server" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.vendor="SMLabs AI"
 
 # Install curl for health checks
 RUN apk add --no-cache curl dumb-init

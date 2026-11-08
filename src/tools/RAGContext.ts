@@ -34,10 +34,12 @@ export interface RAGContextResult {
 
 function cleanText(raw: string): string {
   return raw
-    .replace(/\*\*|__|~~|\[|\]|\(.*?\)/g, '')   // strip markdown
-    .replace(/<[^>]+>/g, '')                      // strip HTML tags
-    .replace(/https?:\/\/\S+/g, '')               // strip URLs inline
-    .replace(/\s{2,}/g, ' ')                      // collapse whitespace
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1') // images → alt text
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')  // links → anchor text (keeps useful parens)
+    .replace(/\*\*|__|~~/g, '')               // strip bold/italic/strike markers
+    .replace(/<[^>]+>/g, '')                  // strip HTML tags
+    .replace(/https?:\/\/\S+/g, '')           // strip URLs inline
+    .replace(/\s{2,}/g, ' ')                  // collapse whitespace
     .trim();
 }
 
@@ -139,10 +141,13 @@ export async function buildRAGContext(
     output_format   = 'json',
   } = options;
 
+  // Clamp chunk size: guards against 0/negative values looping forever
+  const chunkWords = Math.min(1000, Math.max(50, Math.floor(Number(max_chunk_words)) || 200));
+
   const data = await api.search(query, 'web', { num_results, country, freshness, autocorrect: true });
   const organic = data.organic ?? [];
 
-  const mainChunks = buildChunks(organic, max_chunk_words, true);
+  const mainChunks = buildChunks(organic, chunkWords, true);
   const paa        = include_paa ? paaChunks(data, mainChunks.length) : [];
   const allChunks  = [...mainChunks, ...paa];
 

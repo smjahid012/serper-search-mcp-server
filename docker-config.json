@@ -9,8 +9,18 @@
         "-e",
         "SERPER_API_KEY",
         "-e",
+        "TAVILY_API_KEY",
+        "-e",
+        "BRAVE_API_KEY",
+        "-e",
+        "EXA_API_KEY",
+        "-e",
+        "FIRECRAWL_API_KEY",
+        "-e",
+        "OPENROUTER_API_KEY",
+        "-e",
         "GEMINI_API_KEY",
-        "smjahid/server-serper-search:3"
+        "smjahid/server-serper-search:4"
       ]
     }
   }

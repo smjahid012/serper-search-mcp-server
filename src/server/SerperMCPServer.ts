@@ -3,8 +3,20 @@
  * github.com/smjahid012/serper-search-mcp-server
  */
 
+import { createServer } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { webcrypto, timingSafeEqual, randomUUID } from 'node:crypto';
+
+// Node < 19 does not expose WebCrypto as a global. The MCP Streamable HTTP
+// transport needs `globalThis.crypto` (randomUUID for SSE event ids), so
+// polyfill it from node:crypto. No-op on newer Node versions.
+if (!(globalThis as { crypto?: unknown }).crypto) {
+  (globalThis as { crypto?: unknown }).crypto = webcrypto;
+}
+
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -12,27 +24,54 @@ import {
   ErrorCode,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import { ServerConfig, SearchOptions, SearchType } from '../types/index.js';
+import { ServerConfig, SearchOptions, SearchType, Verbosity } from '../types/index.js';
 import { SerperAPI } from '../api/SerperAPI.js';
 import { SearchTools } from '../tools/SearchTools.js';
-import { ResultFormatter } from '../utils/ResultFormatter.js';
+import { ProviderRouter } from '../api/providers/Router.js';
+import { effectiveFetchCount, ResultFormatter } from '../utils/ResultFormatter.js';
 import { runDeepResearch, ResearchDepth } from '../tools/DeepResearch.js';
 import { buildRAGContext } from '../tools/RAGContext.js';
+import { runBatchSearch } from '../tools/BatchSearch.js';
+import { setLogLevel, logger, setRequestId } from '../utils/Logger.js';
+import { AuthError, ValidationError } from '../utils/errors.js';
+import { snapshot as metricsSnapshot } from '../utils/Metrics.js';
 import { version } from '../../package.json';
 
 const SEARCH_TYPE_MAP: Record<string, SearchType> = {
+  search: 'web', // unified tool resolves type from args
   search_web:      'web',
   search_images:   'images',
   search_videos:   'videos',
   search_news:     'news',
   search_shopping: 'shopping',
   search_places:   'places',
+  search_scholar:  'scholar',
+  search_patents:  'patents',
+  autocomplete:    'autocomplete',
 };
+
+/**
+ * When a token is configured, /mcp requires `Authorization: Bearer <token>`.
+ * /health always stays open for load balancers.
+ */
+export function isAuthorized(authorization: string | undefined, token: string | undefined): boolean {
+  if (!token) return true;
+  if (!authorization) return false;
+  const expected = `Bearer ${token}`;
+  const a = Buffer.from(authorization, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  try {
+    return timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
 
 export class SerperMCPServer {
   public readonly config: ServerConfig;
-  private server: Server;
   private api: SerperAPI;
+  private router: ProviderRouter;
 
   constructor(options: Partial<ServerConfig> = {}) {
     this.config = {
@@ -41,30 +80,84 @@ export class SerperMCPServer {
       port:      options.port      || parseInt(process.env.SERPER_MCP_PORT  || '8080', 10),
       host:      options.host      || process.env.SERPER_MCP_HOST   || '0.0.0.0',
       logLevel:  options.logLevel  || process.env.SERPER_MCP_LOG_LEVEL || 'info',
+      authToken: options.authToken || process.env.SERPER_MCP_AUTH_TOKEN || undefined,
     };
 
-    if (!this.config.apiKey) throw new Error('SERPER_API_KEY is required');
+    setLogLevel(this.config.logLevel);
+
+    if (!this.config.apiKey) throw new AuthError('SERPER_API_KEY is required');
 
     this.api = new SerperAPI(this.config.apiKey);
-    this.server = new Server(
+    this.router = new ProviderRouter(this.api);
+  }
+
+  /**
+   * Build a fully-configured MCP server instance.
+   * HTTP mode creates one per request (stateless); stdio mode uses a single instance.
+   */
+  buildServer(): Server {
+    const server = new Server(
       { name: 'serper-search-mcp', version },
       { capabilities: { tools: {} } }
     );
-
-    this.registerHandlers();
+    this.registerHandlers(server);
+    return server;
   }
 
-  private registerHandlers(): void {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  private registerHandlers(server: Server): void {
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: SearchTools.getAllTools(),
     }));
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (req) => {
+    server.setRequestHandler(CallToolRequestSchema, async (req) => {
+      setRequestId(randomUUID().slice(0, 8));
       const { name, arguments: args } = req.params;
+
+      const knownTool =
+        name in SEARCH_TYPE_MAP ||
+        name === 'deep_research' ||
+        name === 'search_rag_context' ||
+        name === 'scrape' ||
+        name === 'search_many' ||
+        name === 'search_maps' ||
+        name === 'search_reviews' ||
+        name === 'search_lens';
+      if (!knownTool) throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
 
       try {
         SearchTools.validateArgs(name, args);
         const a = args as Record<string, unknown>;
+
+        // ── Scrape ────────────────────────────────────────────────────────────
+        if (name === 'scrape') {
+          const url = a['url'] as string;
+          const maxChars = Math.min(200_000, Math.max(1_000, Math.floor(Number(a['max_chars'])) || 50_000));
+          const data = await this.api.scrape(url, {
+            includeMarkdown: (a['include_markdown'] as boolean) ?? true,
+            includeImages:   (a['include_images']   as boolean) ?? false,
+            includeLinks:    (a['include_links']    as boolean) ?? false,
+            includeVideos:   (a['include_videos']   as boolean) ?? false,
+          });
+          const text = ResultFormatter.formatScrape(data, url, maxChars);
+          return { content: [{ type: 'text', text }] };
+        }
+
+        // ── Batch search ──────────────────────────────────────────────────────
+        if (name === 'search_many') {
+          const text = await runBatchSearch(
+            a['queries'] as string[],
+            {
+              num_results: (a['num_results'] as number)  ?? 5,
+              country:     (a['country']     as string)  ?? 'US',
+              search_lang: (a['search_lang'] as string)  ?? 'en',
+              ui_lang:     (a['ui_lang']     as string)  ?? 'en',
+              freshness:   a['freshness'] as SearchOptions['freshness'],
+              safesearch:  (a['safesearch']  as SearchOptions['safesearch']) ?? 'moderate',
+            },
+            this.api
+          );
+          return { content: [{ type: 'text', text }] };
+        }
 
         // ── Deep Research ─────────────────────────────────────────────────────
         if (name === 'deep_research') {
@@ -106,44 +199,196 @@ export class SerperMCPServer {
           return { content: [{ type: 'text', text }] };
         }
 
+        // ── Maps / Reviews / Lens stubs (v3.2 sweep — documented, not silent) ──
+        if (name === 'search_maps' || name === 'search_reviews' || name === 'search_lens') {
+          const hint = name === 'search_maps'
+            ? 'Use search_places instead — same Serper places index with address/phone/hours/GPS.'
+            : name === 'search_reviews'
+              ? 'Use search_places (ratings + review counts) or search_web with "<place> reviews".'
+              : 'Use search_images with a site filter (e.g. site=dribbble.com) for visual discovery.';
+          return { content: [{ type: 'text', text: `## ⚠️ ${name} is not a separate Serper endpoint\n\n${hint}` }] };
+        }
+
         // ── Standard search tools ─────────────────────────────────────────────
-        const searchType = SEARCH_TYPE_MAP[name];
+        let searchType = SEARCH_TYPE_MAP[name];
         if (!searchType) throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+        // Unified `search` tool resolves type from args
+        if (name === 'search' && typeof a['type'] === 'string') {
+          const t = (a['type'] as string).toLowerCase();
+          if (t in SEARCH_TYPE_MAP || ['web','images','videos','news','shopping','places','scholar','patents','autocomplete'].includes(t)) {
+            searchType = t as SearchType;
+          }
+        }
         return await this.runSearch(a, searchType);
 
       } catch (err) {
         if (err instanceof McpError) throw err;
         const msg = err instanceof Error ? err.message : String(err);
+        if (err instanceof ValidationError) throw new McpError(ErrorCode.InvalidParams, msg);
         throw new McpError(ErrorCode.InternalError, msg);
+      } finally {
+        setRequestId('');
       }
     });
 
-    this.server.onerror = (err) => console.error('[MCP error]', err);
-    process.on('SIGINT',  () => this.server.close().then(() => process.exit(0)));
-    process.on('SIGTERM', () => this.server.close().then(() => process.exit(0)));
+    server.onerror = (err) => logger.error('[MCP error]', err);
   }
 
   private async runSearch(args: Record<string, unknown>, searchType: SearchType) {
-    const defaultNum = searchType === 'places' ? 5 : 10;
+    // Credit-safe: compact defaults to num:5 (never fetch-10-show-3)
+    const verbosity = (args['verbosity'] as Verbosity) ?? 'auto';
+    const numResults = effectiveFetchCount(args['num_results'] as number | undefined, verbosity === 'auto' ? 'standard' : verbosity, searchType);
+    const maxChars = args['max_chars'] !== undefined ? Math.max(0, Math.floor(Number(args['max_chars']))) : undefined;
     const opts: Partial<SearchOptions> = {
-      num_results:  (args['num_results']  as number)  ?? defaultNum,
+      num_results:  numResults,
       country:      (args['country']      as string)  ?? 'US',
       search_lang:  (args['search_lang']  as string)  ?? 'en',
       ui_lang:      (args['ui_lang']      as string)  ?? 'en',
-      freshness:    args['freshness']     as SearchOptions['freshness'],
+      freshness:    (args['freshness']    as SearchOptions['freshness'])
+                    ?? (searchType === 'news' ? 'pd' : undefined),
       safesearch:   (args['safesearch']   as SearchOptions['safesearch']) ?? 'moderate',
       summary:      (args['summary']      as boolean) ?? false,
       autocorrect:  (args['autocorrect']  as boolean) ?? true,
       page:         (args['page']         as number)  ?? 1,
+      verbosity,
+      max_chars: maxChars,
+      snippets_only: (args['snippets_only'] as boolean) ?? false,
+      provider: (args['provider'] as string) ?? 'auto',
     };
 
-    const data = await this.api.search(args['query'] as string, searchType, opts);
-    const text = ResultFormatter.format(data, opts.num_results ?? defaultNum, searchType);
+    // Image discovery filters → query shaping (Serper has no native size/color params)
+    let query = args['query'] as string;
+    if (searchType === 'images' && typeof args['site'] === 'string' && args['site']) {
+      query = `site:${args['site']} ${query}`;
+    }
+
+    const data = await this.router.search(query, searchType, opts);
+    const text = searchType === 'places'
+      ? this.formatPlacesWithFilters(data, numResults, args, maxChars)
+      : ResultFormatter.format(data, numResults, searchType, {
+          verbosity,
+          maxChars,
+          snippetsOnly: opts.snippets_only,
+        });
     return { content: [{ type: 'text', text }] };
   }
 
+  private formatPlacesWithFilters(
+    data: import('../types/index.js').SerperAPIResponse,
+    numResults: number,
+    args: Record<string, unknown>,
+    maxChars: number | undefined
+  ): string {
+    // Reuse ResultFormatter.format for header/footer, but inject filtered places first
+    const minRating = args['min_rating'] !== undefined ? Number(args['min_rating']) : undefined;
+    const sortBy = args['sort_by'] as 'rating' | 'reviews' | undefined;
+    const filtered = ResultFormatter.formatPlaces(data.places ?? [], numResults, {
+      minRating: Number.isFinite(minRating as number) ? (minRating as number) : undefined,
+      sortBy: sortBy === 'rating' || sortBy === 'reviews' ? sortBy : undefined,
+    });
+    // Compose final output manually: filtered rows + credit footer.
+    const footer = `\n\n---\n*Provider: ${data.provider ?? 'serper'} · Cache: ${data.cache_hit ? 'hit (0 credits)' : 'miss'}${data.credits !== undefined ? ` · Serper credits used: ${data.credits}` : ''}*`;
+    let text = [`## 📍 Places Search Results${data.searchParameters?.q ? ` — "${data.searchParameters.q}"` : ''}\n`, ...filtered].join('\n') + footer;
+    if (maxChars && maxChars > 0 && text.length > maxChars) {
+      text = text.slice(0, maxChars) + `\n\n…[truncated to ${maxChars.toLocaleString()} chars]`;
+    }
+    return text;
+  }
+
+  /**
+   * Streamable HTTP transport — stateless mode.
+   *   POST /mcp     MCP JSON-RPC endpoint
+   *   GET  /health  container/load-balancer health probe
+   */
+  private async runHttp(): Promise<void> {
+    const MAX_BODY_BYTES = 256 * 1024;
+    const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      // Correlate every log line emitted while handling this request.
+      setRequestId(randomUUID().slice(0, 8));
+      try {
+        // ── Body-size guard: reject oversized requests before buffering ──────
+        const contentLength = Number(req.headers['content-length']);
+        if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Request body too large (max ${MAX_BODY_BYTES} bytes)` }));
+          return;
+        }
+        const pathname = (req.url ?? '/').split('?')[0];
+
+        if (pathname === '/health') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            status: 'ok',
+            name: 'serper-search-mcp',
+            version,
+            auth_required: Boolean(this.config.authToken),
+            uptime_s: Math.round(process.uptime()),
+            metrics: metricsSnapshot(),
+          }));
+          return;
+        }
+
+        if (pathname === '/mcp') {
+          if (!isAuthorized(req.headers.authorization, this.config.authToken)) {
+            res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' });
+            res.end(JSON.stringify({ error: 'Unauthorized — send Authorization: Bearer <SERPER_MCP_AUTH_TOKEN>' }));
+            return;
+          }
+
+          const server = this.buildServer();
+          const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+          res.on('close', () => {
+            void transport.close();
+            void server.close();
+          });
+          await server.connect(transport);
+          await transport.handleRequest(req, res);
+          return;
+        }
+
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Not found. MCP endpoint: POST /mcp' }));
+      } catch (err) {
+        if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+      } finally {
+        setRequestId('');
+      }
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      httpServer.once('error', reject);
+      httpServer.listen(this.config.port, this.config.host, resolve);
+    });
+
+    // ── Server timeout + graceful shutdown for HTTP (matches stdio SIG handling)
+    httpServer.timeout = 120_000;
+    httpServer.keepAliveTimeout = 5_000;
+    const shutdown = () => {
+      logger.info('Shutting down HTTP server…');
+      httpServer.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 10_000).unref();
+    };
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
+
+    logger.info(
+      `Serper Search MCP Server v${version} — HTTP listening on http://${this.config.host}:${this.config.port}/mcp ` +
+      `(health: /health${this.config.authToken ? ' · bearer auth enabled' : ''})`
+    );
+  }
+
   async run(): Promise<void> {
-    await this.server.connect(new StdioServerTransport());
-    console.error(`Serper Search MCP Server v${version} — SMLabs AI`);
+    if (this.config.transport === 'http') {
+      await this.runHttp();
+      return;
+    }
+
+    const server = this.buildServer();
+    process.on('SIGINT',  () => server.close().then(() => process.exit(0)));
+    process.on('SIGTERM', () => server.close().then(() => process.exit(0)));
+
+    await server.connect(new StdioServerTransport());
+    logger.info(`Serper Search MCP Server v${version} — SMLabs AI`);
   }
 }

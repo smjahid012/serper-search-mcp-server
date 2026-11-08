@@ -1,6 +1,6 @@
 {
   "name": "serper-search-mcp",
-  "version": "3.0.3",
+  "version": "4.0.0",
   "description": "MCP server for Serper API — Google web, image, video, news, shopping, and places search for AI agents",
   "main": "index.js",
   "bin": {
@@ -8,14 +8,19 @@
   },
   "scripts": {
     "build": "tsc",
+    "bundle": "node scripts/bundle.mjs",
+    "check:bundle": "node scripts/bundle.mjs --check",
+    "pretest": "npm run build",
+    "test": "node --test",
     "start": "node index.js",
-    "dev": "ts-node src/index.ts",
-    "http": "SERPER_MCP_TRANSPORT=http node index.js",
-    "docker:build": "docker build -t smjahid/serper-search-mcp .",
-    "docker:run": "docker run -i --rm -e SERPER_API_KEY smjahid/serper-search-mcp",
+    "dev": "npm run bundle && node index.js",
+    "http": "node index.js --transport http",
+    "docker:build": "docker build -t smjahid/server-serper-search .",
+    "docker:run": "docker run -i --rm -e SERPER_API_KEY smjahid/server-serper-search",
     "help": "node index.js --help",
-    "clean": "rm -rf dist",
-    "rebuild": "npm run clean && npm run build"
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "rebuild": "npm run clean && npm run build && npm run bundle",
+    "prepublishOnly": "npm run rebuild && npm test"
   },
   "keywords": [
     "mcp",
@@ -44,6 +49,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "esbuild": "^0.28.2",
     "typescript": "^5.0.0"
   },
   "engines": {
@@ -61,7 +67,8 @@
     "dist/",
     "index.js",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "SKILL.md"
   ],
   "publishConfig": {
     "access": "public"

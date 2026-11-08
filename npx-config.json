@@ -5,6 +5,11 @@
       "args": ["-y", "serper-search-mcp"],
       "env": {
         "SERPER_API_KEY": "${SERPER_API_KEY}",
+        "TAVILY_API_KEY": "${TAVILY_API_KEY}",
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}",
+        "EXA_API_KEY": "${EXA_API_KEY}",
+        "FIRECRAWL_API_KEY": "${FIRECRAWL_API_KEY}",
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}",
         "GEMINI_API_KEY": "${GEMINI_API_KEY}"
       }
     }

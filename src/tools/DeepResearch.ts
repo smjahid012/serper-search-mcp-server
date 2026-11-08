@@ -10,6 +10,7 @@
 
 import { SerperAPI } from '../api/SerperAPI.js';
 import { callLLM, getLLMProvider } from '../api/LLMClient.js';
+import { mapWithConcurrency, RESEARCH_CONCURRENCY } from '../utils/Concurrency.js';
 import { OrganicResult } from '../types/index.js';
 
 export type ResearchDepth = 'basic' | 'standard' | 'deep';
@@ -32,8 +33,12 @@ interface ResearchResult {
 const DEPTH_CONFIG: Record<ResearchDepth, { subQueries: number; resultsPerQuery: number }> = {
   basic:    { subQueries: 3, resultsPerQuery: 3 },
   standard: { subQueries: 5, resultsPerQuery: 5 },
-  deep:     { subQueries: 8, resultsPerQuery: 7 },
+  deep:     { subQueries: 8, resultsPerQuery: 5 },
 };
+
+// Token/credit budget: truncate aggregated LLM context so deep research
+// stays bounded (~12k chars). Keeps report quality, caps LLM tokens.
+const MAX_RESEARCH_CONTEXT_CHARS = 12_000;
 
 // ── Step 1: generate sub-queries ──────────────────────────────────────────────
 
@@ -70,7 +75,7 @@ async function runSearches(
   api: SerperAPI,
   country: string
 ): Promise<SubQueryResult[]> {
-  const searches = subQueries.map(async (sq) => {
+  const searches = subQueries.map((sq) => async () => {
     try {
       const data = await api.search(sq, 'web', { num_results: resultsPerQuery, country });
       return {
@@ -82,12 +87,12 @@ async function runSearches(
     }
   });
 
-  return Promise.all(searches);
+  return mapWithConcurrency(searches, RESEARCH_CONCURRENCY, (fn) => fn());
 }
 
 // ── Step 3: build context string for LLM ─────────────────────────────────────
 
-function buildContext(searchResults: SubQueryResult[]): { context: string; sourceCount: number } {
+function buildContext(searchResults: SubQueryResult[]): { context: string; sourceCount: number; truncated: boolean } {
   const sections: string[] = [];
   let sourceCount = 0;
 
@@ -104,7 +109,14 @@ function buildContext(searchResults: SubQueryResult[]): { context: string; sourc
     }
   }
 
-  return { context: sections.join('\n'), sourceCount };
+  let context = sections.join('\n');
+  let truncated = false;
+  if (context.length > MAX_RESEARCH_CONTEXT_CHARS) {
+    context = context.slice(0, MAX_RESEARCH_CONTEXT_CHARS) + '\n\n…[context truncated to 12k chars]';
+    truncated = true;
+  }
+
+  return { context, sourceCount, truncated };
 }
 
 // ── Step 4: synthesize report ─────────────────────────────────────────────────
@@ -155,7 +167,7 @@ export async function runDeepResearch(
     );
   }
 
-  const { subQueries: subQueryCount, resultsPerQuery } = DEPTH_CONFIG[depth];
+  const { subQueries: subQueryCount, resultsPerQuery } = DEPTH_CONFIG[depth] ?? DEPTH_CONFIG.standard;
 
   // Step 1
   const subQueries = await generateSubQueries(query, subQueryCount);

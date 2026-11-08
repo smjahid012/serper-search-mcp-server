@@ -8,6 +8,9 @@ yarn-error.log*
 dist/
 build/
 *.tsbuildinfo
+deepresearch.md
+smdocs
+AGENTS.md
 
 # Environment variables
 .env
@@ -95,8 +98,6 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# Docker
-.dockerignore
 
 # Testing
 test-results/
@@ -110,3 +111,12 @@ coverage/
 #serper-mcp
 *.dist
 *.test-server.sh
+
+# Local tooling / indexes
+.codegraph/
+.smagi/
+readme-luna.md
+
+
+# Local archives
+*.rar
