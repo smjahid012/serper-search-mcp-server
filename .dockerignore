@@ -45,3 +45,4 @@ docker-config.json
 docker-compose.yml
 temp/
 tmp/
+.playwright-mcp/

@@ -120,3 +120,4 @@ readme-luna.md
 
 # Local archives
 *.rar
+.playwright-mcp

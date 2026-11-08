@@ -50,8 +50,6 @@ jobs:
 
       - name: Publish to npm (OIDC Trusted Publisher)
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-docker:
     needs: test-and-validate
