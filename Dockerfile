@@ -1,22 +1,28 @@
-# Build stage
-FROM node:20-alpine AS builder
+# syntax=docker/dockerfile:1
 
-# Create app directory
+# ─── Build stage ────────────────────────────────────────────────────────────
+# BUILDPLATFORM = host (amd64) → npm ci & tsc run natively, NOT under QEMU.
+# Output is pure JS so it works on any target platform.
+FROM --platform=$BUILDPLATFORM node:20-alpine AS builder
+
 WORKDIR /app
 
-# Copy package files
+# Copy package files first (layer cache)
 COPY package*.json ./
 
-# Install all dependencies (including dev dependencies for building)
-RUN npm ci
+# npm cache mount → skips re-downloading packages on subsequent builds
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci
 
 # Copy source code
 COPY . .
 
-# Build the application: tsc -> dist/, then esbuild -> index.js bundle
+# Build: tsc → dist/, esbuild → index.js bundle
 RUN npm run rebuild
 
-# Production stage
+# ─── Production stage ────────────────────────────────────────────────────────
+# TARGETPLATFORM = arm64 or amd64 — Docker pulls the right node image natively.
+# No QEMU emulation here either — just copying files into the right base image.
 FROM node:20-alpine AS production
 
 LABEL org.opencontainers.image.title="serper-search-mcp" \
@@ -26,40 +32,31 @@ LABEL org.opencontainers.image.title="serper-search-mcp" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.vendor="SMLabs AI"
 
-# Install curl for health checks
+# Install system deps
 RUN apk add --no-cache curl dumb-init
 
-# Create app directory
 WORKDIR /app
 
-# Copy package files
+# Install only production deps (with npm cache mount)
 COPY package*.json ./
-
-# Install only production dependencies
-RUN npm ci --only=production && npm cache clean --force
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --omit=dev && npm cache clean --force
 
 # Create non-root user
 RUN addgroup -g 1001 -S serperuser && \
     adduser -S serperuser -u 1001 -G serperuser
 
-# Copy built application from builder stage
+# Copy built artifacts from builder (pure JS — works on all platforms)
 COPY --from=builder --chown=serperuser:serperuser /app/dist ./dist/
 COPY --from=builder --chown=serperuser:serperuser /app/index.js ./
 
-# Switch to non-root user
 USER serperuser
 
-# Expose port for HTTP transport
 EXPOSE 8080
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:8080/health 2>/dev/null || \
-      # Fallback to checking if process is running
       pgrep -f "node.*index.js" > /dev/null || exit 1
 
-# Use dumb-init to handle signals properly
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
-
-# Start the server
 CMD ["node", "index.js"]
