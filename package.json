@@ -20,7 +20,7 @@
     "help": "node index.js --help",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "rebuild": "npm run clean && npm run build && npm run bundle",
-    "prepublishOnly": "npm run rebuild && npm test"
+    "prepublishOnly": "npm run rebuild && npm run check:bundle && npm test"
   },
   "keywords": [
     "mcp",
@@ -48,12 +48,12 @@
     "@modelcontextprotocol/sdk": "^1.0.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@types/node": "^22.20.5",
     "esbuild": "^0.28.2",
     "typescript": "^5.0.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "repository": {
     "type": "git",
