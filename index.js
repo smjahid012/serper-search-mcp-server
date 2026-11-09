@@ -1962,7 +1962,7 @@ init_errors();
 init_Metrics();
 
 // package.json
-var version = "4.0.0";
+var version = "4.0.1";
 
 // src/server/SerperMCPServer.ts
 if (!globalThis.crypto) {
