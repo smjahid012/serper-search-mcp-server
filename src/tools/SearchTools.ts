@@ -35,7 +35,7 @@ export class SearchTools {
   }
 
   private static numResults(max = 20, def = 10) {
-    return { num_results: { type: 'number', description: `Results (1–${max}, default ${def}).`, minimum: 1, maximum: max, default: def } };
+    return { num_results: { type: 'number', description: `Results (1–${max}, default ${def}). Note: >10 results uses 2 Serper credits.`, minimum: 1, maximum: max, default: def } };
   }
 
   private static freshness(def?: string) {

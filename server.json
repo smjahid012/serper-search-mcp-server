@@ -1,0 +1,67 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/registry/main/docs/reference/server-json/draft/server.schema.json",
+  "name": "io.github.smjahid012/serper-search-mcp",
+  "title": "Serper Search MCP",
+  "description": "Universal Google Search MCP: web, images, places, shopping, scholar, patents, deep research & RAG",
+  "version": "4.0.1",
+  "websiteUrl": "https://github.com/smjahid012/serper-search-mcp-server",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "serper-search-mcp",
+      "version": "4.0.1",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "SERPER_API_KEY",
+          "description": "Your Serper API key — get 2,500 free credits at https://serper.dev",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "GEMINI_API_KEY",
+          "description": "Google AI Studio key for deep_research (free tier) — get one at https://ai.google.dev",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "OPENROUTER_API_KEY",
+          "description": "OpenRouter LLM key for deep_research — takes priority over Gemini; free models at https://openrouter.ai",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "TAVILY_API_KEY",
+          "description": "Tavily fallback search provider — 1,000 free searches/month at https://tavily.com",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "BRAVE_API_KEY",
+          "description": "Brave Search fallback provider — 2,000 free queries/month at https://brave.com/search/api",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "EXA_API_KEY",
+          "description": "Exa neural semantic search fallback — get a key at https://exa.ai",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "FIRECRAWL_API_KEY",
+          "description": "Firecrawl for JS-rendered page scraping (upgrades the scrape tool) — https://firecrawl.dev",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "repository": {
+    "url": "https://github.com/smjahid012/serper-search-mcp-server",
+    "source": "github"
+  }
+}

@@ -6,6 +6,8 @@
  * Caching: in-memory TTL + LRU for successful responses (SERPER_CACHE_TTL_MS=0 disables).
  */
 
+import os from 'node:os';
+import path from 'node:path';
 import {
   ScrapeOptions,
   SearchOptions,
@@ -47,10 +49,23 @@ function numberFromEnv(name: string, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+function getPersistPath(name: string): string | undefined {
+  if (process.env.SERPER_CACHE_PERSIST === 'false') return undefined;
+  const dir = process.env.SERPER_CACHE_DIR || path.join(os.homedir(), '.serper-cache');
+  return path.join(dir, `${name}.json`);
+}
+
 function buildSearchBody(query: string, options: Partial<SearchOptions>): Record<string, unknown> {
+  const normalizedQuery = query.trim().replace(/\s+/g, ' ');
+  // Serper credit guard: 1-10 results costs 1 credit; > 10 costs 2 credits.
+  const requestedNum = options.num_results !== undefined && Number.isFinite(options.num_results)
+    ? options.num_results
+    : 10;
+  const num = Math.max(1, Math.min(requestedNum, 20));
+
   const body: Record<string, unknown> = {
-    q: query,
-    num: Math.max(1, Math.min(options.num_results ?? 10, 20)),
+    q: normalizedQuery,
+    num,
     gl: (options.country ?? 'US').toLowerCase(),
     hl: options.search_lang ?? options.ui_lang ?? 'en',
     autocorrect: options.autocorrect ?? true,
@@ -82,8 +97,11 @@ export class SerperAPI {
     const cacheTtlMs = options.cacheTtlMs ?? numberFromEnv('SERPER_CACHE_TTL_MS', 600_000);
     const cacheMax   = options.cacheMaxEntries ?? numberFromEnv('SERPER_CACHE_MAX', 200);
 
-    this.cache       = cacheTtlMs > 0 ? new TtlCache<SerperAPIResponse>(cacheTtlMs, cacheMax) : null;
-    this.scrapeCache = cacheTtlMs > 0 ? new TtlCache<Record<string, unknown>>(cacheTtlMs, cacheMax) : null;
+    const persistPath = getPersistPath('search-cache');
+    const scrapePersistPath = getPersistPath('scrape-cache');
+
+    this.cache       = cacheTtlMs > 0 ? new TtlCache<SerperAPIResponse>(cacheTtlMs, cacheMax, persistPath) : null;
+    this.scrapeCache = cacheTtlMs > 0 ? new TtlCache<Record<string, unknown>>(cacheTtlMs, cacheMax, scrapePersistPath) : null;
   }
 
   async search(
@@ -93,14 +111,17 @@ export class SerperAPI {
   ): Promise<SerperAPIResponse> {
     const url = ENDPOINT_MAP[searchType] ?? ENDPOINT_MAP.web;
     const body = buildSearchBody(query, options);
-    const cacheKey = `${searchType}:${JSON.stringify(body)}`;
+
+    // Normalize query in cache key (lowercased) so casing differences don't burn duplicate credits
+    const cacheQuery = (body.q as string).toLowerCase();
+    const cacheKey = `${searchType}:${JSON.stringify({ ...body, q: cacheQuery })}`;
     increment('searches');
 
     const cached = this.cache?.get(cacheKey);
     if (cached) {
       increment('cache_hits');
       logger.debug(`SerperAPI: cache hit (${searchType})`);
-      return cached;
+      return { ...cached, cache_hit: true, credits: 0 };
     }
     increment('cache_misses');
 
@@ -114,19 +135,20 @@ export class SerperAPI {
    * Note: this endpoint lives on scrape.serper.dev, not google.serper.dev.
    */
   async scrape(url: string, options: ScrapeOptions = {}): Promise<Record<string, unknown>> {
+    const normalizedUrl = url.trim();
     const body: Record<string, unknown> = {
-      url,
+      url: normalizedUrl,
       includeMarkdown: options.includeMarkdown ?? true,
       includeImages:   options.includeImages ?? false,
       includeLinks:    options.includeLinks ?? false,
       includeVideos:   options.includeVideos ?? false,
     };
-    const cacheKey = `scrape:${JSON.stringify(body)}`;
+    const cacheKey = `scrape:${normalizedUrl.toLowerCase()}:${JSON.stringify(body)}`;
 
     const cached = this.scrapeCache?.get(cacheKey);
     if (cached) {
       logger.debug('SerperAPI: cache hit (scrape)');
-      return cached;
+      return { ...cached, cache_hit: true };
     }
 
     const data = await this.post<Record<string, unknown>>(SCRAPE_ENDPOINT, body);

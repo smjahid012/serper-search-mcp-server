@@ -50,4 +50,20 @@ describe('TtlCache', () => {
     cache.clear();
     assert.equal(cache.get('a'), undefined);
   });
+
+  it('persists and reloads entries from disk', () => {
+    import('node:fs').then(({ rmSync, existsSync }) => {
+      const testPath = './tests/.tmp-cache.json';
+      try { if (existsSync(testPath)) rmSync(testPath); } catch {}
+      const cache1 = new TtlCache(60_000, 10, testPath);
+      cache1.set('test-key', { foo: 'bar' });
+      cache1.flushToDisk();
+
+      const cache2 = new TtlCache(60_000, 10, testPath);
+      assert.deepEqual(cache2.get('test-key'), { foo: 'bar' });
+
+      cache2.clear();
+      try { if (existsSync(testPath)) rmSync(testPath); } catch {}
+    });
+  });
 });

@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 "use strict";
+var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __esm = (fn, res, err) => function __init() {
   if (err) throw err[0];
@@ -24,6 +26,14 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // src/utils/Logger.ts
@@ -132,21 +142,73 @@ var init_HttpRetry = __esm({
 });
 
 // src/utils/TtlCache.ts
-var TtlCache;
+var import_node_fs, import_node_path, TtlCache;
 var init_TtlCache = __esm({
   "src/utils/TtlCache.ts"() {
     "use strict";
+    import_node_fs = require("node:fs");
+    import_node_path = require("node:path");
     TtlCache = class {
-      constructor(ttlMs, maxEntries = 200) {
+      constructor(ttlMs, maxEntries = 200, persistPath) {
         this.ttlMs = ttlMs;
         this.maxEntries = maxEntries;
         this.store = /* @__PURE__ */ new Map();
+        this.persistPath = persistPath;
+        if (this.persistPath) {
+          this.loadFromDisk();
+        }
+      }
+      loadFromDisk() {
+        if (!this.persistPath) return;
+        try {
+          if (!(0, import_node_fs.existsSync)(this.persistPath)) return;
+          const raw = (0, import_node_fs.readFileSync)(this.persistPath, "utf-8");
+          const data = JSON.parse(raw);
+          const now = Date.now();
+          if (Array.isArray(data)) {
+            for (const [key, entry] of data) {
+              if (entry && typeof entry.expiresAt === "number" && entry.expiresAt > now) {
+                this.store.set(key, entry);
+              }
+            }
+          }
+        } catch {
+        }
+      }
+      scheduleSave() {
+        if (!this.persistPath || this.ttlMs <= 0) return;
+        if (this.saveTimeout) clearTimeout(this.saveTimeout);
+        this.saveTimeout = setTimeout(() => {
+          this.flushToDisk();
+        }, 500);
+        if (this.saveTimeout && typeof this.saveTimeout.unref === "function") {
+          this.saveTimeout.unref();
+        }
+      }
+      flushToDisk() {
+        if (!this.persistPath) return;
+        try {
+          const now = Date.now();
+          const validEntries = [];
+          for (const [k, v] of this.store.entries()) {
+            if (v && v.expiresAt > now) {
+              validEntries.push([k, v]);
+            }
+          }
+          const dir = (0, import_node_path.dirname)(this.persistPath);
+          if (!(0, import_node_fs.existsSync)(dir)) {
+            (0, import_node_fs.mkdirSync)(dir, { recursive: true });
+          }
+          (0, import_node_fs.writeFileSync)(this.persistPath, JSON.stringify(validEntries), "utf-8");
+        } catch {
+        }
       }
       get(key) {
         const entry = this.store.get(key);
         if (!entry) return void 0;
         if (Date.now() >= entry.expiresAt) {
           this.store.delete(key);
+          this.scheduleSave();
           return void 0;
         }
         this.store.delete(key);
@@ -162,12 +224,14 @@ var init_TtlCache = __esm({
           if (oldest === void 0) break;
           this.store.delete(oldest);
         }
+        this.flushToDisk();
       }
       get size() {
         return this.store.size;
       }
       clear() {
         this.store.clear();
+        this.flushToDisk();
       }
     };
   }
@@ -205,10 +269,18 @@ function numberFromEnv(name, fallback) {
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
+function getPersistPath(name) {
+  if (process.env.SERPER_CACHE_PERSIST === "false") return void 0;
+  const dir = process.env.SERPER_CACHE_DIR || import_node_path2.default.join(import_node_os.default.homedir(), ".serper-cache");
+  return import_node_path2.default.join(dir, `${name}.json`);
+}
 function buildSearchBody(query, options) {
+  const normalizedQuery = query.trim().replace(/\s+/g, " ");
+  const requestedNum = options.num_results !== void 0 && Number.isFinite(options.num_results) ? options.num_results : 10;
+  const num = Math.max(1, Math.min(requestedNum, 20));
   const body = {
-    q: query,
-    num: Math.max(1, Math.min(options.num_results ?? 10, 20)),
+    q: normalizedQuery,
+    num,
     gl: (options.country ?? "US").toLowerCase(),
     hl: options.search_lang ?? options.ui_lang ?? "en",
     autocorrect: options.autocorrect ?? true
@@ -220,10 +292,12 @@ function buildSearchBody(query, options) {
   if (options.page && options.page > 1) body.page = options.page;
   return body;
 }
-var ENDPOINT_MAP, SCRAPE_ENDPOINT, SerperAPI;
+var import_node_os, import_node_path2, ENDPOINT_MAP, SCRAPE_ENDPOINT, SerperAPI;
 var init_SerperAPI = __esm({
   "src/api/SerperAPI.ts"() {
     "use strict";
+    import_node_os = __toESM(require("node:os"));
+    import_node_path2 = __toESM(require("node:path"));
     init_HttpRetry();
     init_TtlCache();
     init_Logger();
@@ -248,19 +322,22 @@ var init_SerperAPI = __esm({
         this.baseDelayMs = options.baseDelayMs ?? numberFromEnv("SERPER_RETRY_BASE_MS", 500);
         const cacheTtlMs = options.cacheTtlMs ?? numberFromEnv("SERPER_CACHE_TTL_MS", 6e5);
         const cacheMax = options.cacheMaxEntries ?? numberFromEnv("SERPER_CACHE_MAX", 200);
-        this.cache = cacheTtlMs > 0 ? new TtlCache(cacheTtlMs, cacheMax) : null;
-        this.scrapeCache = cacheTtlMs > 0 ? new TtlCache(cacheTtlMs, cacheMax) : null;
+        const persistPath = getPersistPath("search-cache");
+        const scrapePersistPath = getPersistPath("scrape-cache");
+        this.cache = cacheTtlMs > 0 ? new TtlCache(cacheTtlMs, cacheMax, persistPath) : null;
+        this.scrapeCache = cacheTtlMs > 0 ? new TtlCache(cacheTtlMs, cacheMax, scrapePersistPath) : null;
       }
       async search(query, searchType = "web", options = {}) {
         const url = ENDPOINT_MAP[searchType] ?? ENDPOINT_MAP.web;
         const body = buildSearchBody(query, options);
-        const cacheKey = `${searchType}:${JSON.stringify(body)}`;
+        const cacheQuery = body.q.toLowerCase();
+        const cacheKey = `${searchType}:${JSON.stringify({ ...body, q: cacheQuery })}`;
         increment("searches");
         const cached = this.cache?.get(cacheKey);
         if (cached) {
           increment("cache_hits");
           logger.debug(`SerperAPI: cache hit (${searchType})`);
-          return cached;
+          return { ...cached, cache_hit: true, credits: 0 };
         }
         increment("cache_misses");
         const data = await this.post(url, body);
@@ -272,18 +349,19 @@ var init_SerperAPI = __esm({
        * Note: this endpoint lives on scrape.serper.dev, not google.serper.dev.
        */
       async scrape(url, options = {}) {
+        const normalizedUrl = url.trim();
         const body = {
-          url,
+          url: normalizedUrl,
           includeMarkdown: options.includeMarkdown ?? true,
           includeImages: options.includeImages ?? false,
           includeLinks: options.includeLinks ?? false,
           includeVideos: options.includeVideos ?? false
         };
-        const cacheKey = `scrape:${JSON.stringify(body)}`;
+        const cacheKey = `scrape:${normalizedUrl.toLowerCase()}:${JSON.stringify(body)}`;
         const cached = this.scrapeCache?.get(cacheKey);
         if (cached) {
           logger.debug("SerperAPI: cache hit (scrape)");
-          return cached;
+          return { ...cached, cache_hit: true };
         }
         const data = await this.post(SCRAPE_ENDPOINT, body);
         this.scrapeCache?.set(cacheKey, data);
@@ -1422,7 +1500,7 @@ var SearchTools = class {
     };
   }
   static numResults(max = 20, def = 10) {
-    return { num_results: { type: "number", description: `Results (1\u2013${max}, default ${def}).`, minimum: 1, maximum: max, default: def } };
+    return { num_results: { type: "number", description: `Results (1\u2013${max}, default ${def}). Note: >10 results uses 2 Serper credits.`, minimum: 1, maximum: max, default: def } };
   }
   static freshness(def) {
     return { freshness: { type: "string", description: `Time filter: pd=day pw=week pm=month py=year.${def ? ` Default: "${def}".` : ""}`, enum: ["pd", "pw", "pm", "py"] } };
