@@ -5,6 +5,8 @@
 
 import { ToolDefinition } from '../types/index.js';
 import { ValidationError } from '../utils/errors.js';
+import { LINK_MODES } from '../utils/LinkResolution.js';
+import { LinkResolver } from './ResolveLinks.js';
 
 export class SearchTools {
   static getAllTools(): ToolDefinition[] {
@@ -23,6 +25,7 @@ export class SearchTools {
       this.batchSearch(),
       this.deepResearch(),
       this.ragContext(),
+      this.resolveLinksTool(),
     ];
   }
 
@@ -72,6 +75,20 @@ export class SearchTools {
     };
   }
 
+  private static linkResolution() {
+    return {
+      link_resolution: {
+        type: 'string',
+        enum: [...LINK_MODES],
+        description:
+          'Google result links beyond the top 3 may come back as google.com/goto redirects. ' +
+          '"auto" (default): top 3 resolved, any leftover goto links get a search_id for resolve_links. ' +
+          '"all": also resolve every link now (free, but adds ~30 s when goto links are present). ' +
+          '"none": fastest, links exactly as Google returns them.',
+      },
+    };
+  }
+
   private static unifiedSearch(): ToolDefinition {
     return {
       name: 'search',
@@ -94,6 +111,7 @@ export class SearchTools {
           ...this.freshness(),
           ...this.safesearch(),
           ...this.verbosityParam(),
+          ...this.linkResolution(),
         },
         required: ['query'],
       },
@@ -116,6 +134,7 @@ export class SearchTools {
           autocorrect: { type: 'boolean', description: 'Auto-correct spelling. Default: true.', default: true },
           summary:     { type: 'boolean', description: 'Request Serper AI summary. Default: false.', default: false },
           page:        { type: 'number',  description: 'Page number for pagination. Default: 1.', minimum: 1, default: 1 },
+          ...this.linkResolution(),
         },
         required: ['query'],
       },
@@ -139,6 +158,7 @@ export class SearchTools {
           color: { type: 'string', description: 'Dominant color filter (e.g. blue, red, green).' },
           site: { type: 'string', description: 'Restrict to domain (e.g. dribbble.com, behance.net, unsplash.com).' },
           layout: { type: 'string', description: 'list (default) or gallery (renderable ![thumb] grid).', enum: ['list', 'gallery'], default: 'list' },
+          ...this.linkResolution(),
         },
         required: ['query'],
       },
@@ -157,6 +177,7 @@ export class SearchTools {
           ...this.localeParams(),
           ...this.freshness(),
           ...this.safesearch(),
+          ...this.linkResolution(),
         },
         required: ['query'],
       },
@@ -175,6 +196,7 @@ export class SearchTools {
           ...this.localeParams(),
           ...this.freshness('pd'),
           ...this.safesearch(),
+          ...this.linkResolution(),
         },
         required: ['query'],
       },
@@ -191,6 +213,7 @@ export class SearchTools {
           query: { type: 'string', description: 'Product or shopping query.' },
           ...this.numResults(),
           ...this.localeParams(),
+          ...this.linkResolution(),
         },
         required: ['query'],
       },
@@ -390,8 +413,29 @@ export class SearchTools {
             enum: ['json', 'text'],
             default: 'json',
           },
+          ...this.linkResolution(),
         },
         required: ['query'],
+      },
+    };
+  }
+
+  private static resolveLinksTool(): ToolDefinition {
+    return {
+      name: 'resolve_links',
+      description:
+        'Turn google.com/goto redirect links from a recent search into real URLs via Serper /resolve ' +
+        '(free, 0 credits). Pass the search_id a search result asked for, or a list of goto links. ' +
+        'Right after a search one call takes ~20–30 s. Links not ready yet stay goto links; Serper then suggests ' +
+        'a wait (often 90 s), which is only honoured if it fits in max_wait_seconds — otherwise call again later.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          search_id:        { type: 'string', description: 'search_id shown in a search result that still had goto links.' },
+          links:            { type: 'array', items: { type: 'string' }, description: 'google.com/goto?url=… links to resolve (alternative to search_id, max 100).', maxItems: 100 },
+          max_wait_seconds: { type: 'number', description: 'Retry within this budget when Serper says to wait (default 60).', minimum: 0, maximum: 300, default: 60 },
+        },
+        required: [],
       },
     };
   }
@@ -445,6 +489,12 @@ export class SearchTools {
         throw new ValidationError('provider must be auto|serper|tavily|brave|exa|firecrawl|all');
       }
     }
+
+    if (a['link_resolution'] !== undefined && !LINK_MODES.includes(a['link_resolution'] as never)) {
+      throw new ValidationError(`link_resolution must be ${LINK_MODES.join('|')}`);
+    }
+
+    if (toolName === 'resolve_links') LinkResolver.validateArgs(a);
 
     if (a['max_chars'] !== undefined) {
       const n = Number(a['max_chars']);

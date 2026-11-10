@@ -14,6 +14,8 @@ const KNOWN_ENV = new Set([
   // tuning (read lazily via numberFromEnv)
   'SERPER_CACHE_TTL_MS', 'SERPER_CACHE_MAX', 'SERPER_TIMEOUT_MS', 'SERPER_RETRIES',
   'SERPER_RETRY_BASE_MS', 'SERPER_LLM_TIMEOUT_MS', 'SERPER_LLM_RETRIES',
+  // Google redirect-link resolution
+  'SERPER_LINK_RESOLUTION', 'SERPER_RESOLVE_MAX_WAIT',
   // provider routing
   'SEARCH_PROVIDER_ORDER', 'SEARCH_FALLBACK',
 ]);
@@ -53,6 +55,11 @@ export function validateEnv(env: NodeJS.ProcessEnv = process.env): string[] {
   const port = env.SERPER_MCP_PORT;
   if (port !== undefined && port !== '' && !(Number.isInteger(Number(port)) && Number(port) > 0 && Number(port) <= 65535)) {
     warnings.push(`SERPER_MCP_PORT must be an integer 1-65535 (got "${port}") — falling back to 8080`);
+  }
+
+  const linkMode = env.SERPER_LINK_RESOLUTION;
+  if (linkMode && !['auto', 'all', 'none'].includes(linkMode)) {
+    warnings.push(`SERPER_LINK_RESOLUTION must be auto|all|none (got "${linkMode}") — falling back to auto`);
   }
 
   const order = env.SEARCH_PROVIDER_ORDER;

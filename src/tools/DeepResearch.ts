@@ -12,12 +12,14 @@ import { SerperAPI } from '../api/SerperAPI.js';
 import { callLLM, getLLMProvider } from '../api/LLMClient.js';
 import { mapWithConcurrency, RESEARCH_CONCURRENCY } from '../utils/Concurrency.js';
 import { OrganicResult } from '../types/index.js';
+import { countGotoLinks, isGotoLink } from '../utils/LinkResolution.js';
 
 export type ResearchDepth = 'basic' | 'standard' | 'deep';
 
 interface SubQueryResult {
   subQuery: string;
   results: OrganicResult[];
+  resolveError?: string;
 }
 
 interface ResearchResult {
@@ -28,6 +30,10 @@ interface ResearchResult {
   sourceCount: number;
   provider: string;
   model: string;
+  /** Cited sources whose URL is still a google.com/goto redirect. */
+  gotoSources: Array<{ n: number; link: string }>;
+  /** Distinct /resolve errors, if resolving failed. */
+  resolveErrors: string[];
 }
 
 const DEPTH_CONFIG: Record<ResearchDepth, { subQueries: number; resultsPerQuery: number }> = {
@@ -78,10 +84,19 @@ async function runSearches(
   const searches = subQueries.map((sq) => async () => {
     try {
       const data = await api.search(sq, 'web', { num_results: resultsPerQuery, country });
-      return {
-        subQuery: sq,
-        results: (data.organic ?? []).slice(0, resultsPerQuery),
-      } as SubQueryResult;
+      let results = (data.organic ?? []).slice(0, resultsPerQuery);
+      let resolveError: string | undefined;
+      // Resolve Google redirect links before the URLs go into the prompt (free).
+      if (countGotoLinks(results)) {
+        try {
+          const r = await api.resolve({ links: results.map((x) => x.link) });
+          const links = r.data['links'] as unknown[];
+          results = results.map((x, i) => (typeof links[i] === 'string' ? { ...x, link: links[i] as string } : x));
+        } catch (err) {
+          resolveError = err instanceof Error ? err.message : String(err);
+        }
+      }
+      return { subQuery: sq, results, resolveError } as SubQueryResult;
     } catch {
       return { subQuery: sq, results: [] } as SubQueryResult;
     }
@@ -92,8 +107,14 @@ async function runSearches(
 
 // ── Step 3: build context string for LLM ─────────────────────────────────────
 
-function buildContext(searchResults: SubQueryResult[]): { context: string; sourceCount: number; truncated: boolean } {
+function buildContext(searchResults: SubQueryResult[]): {
+  context: string;
+  sourceCount: number;
+  truncated: boolean;
+  gotoSources: Array<{ n: number; link: string }>;
+} {
   const sections: string[] = [];
+  const gotoSources: Array<{ n: number; link: string }> = [];
   let sourceCount = 0;
 
   for (const { subQuery, results } of searchResults) {
@@ -101,6 +122,7 @@ function buildContext(searchResults: SubQueryResult[]): { context: string; sourc
     sections.push(`### Sub-query: "${subQuery}"\n`);
     for (const r of results) {
       sourceCount++;
+      if (isGotoLink(r.link)) gotoSources.push({ n: sourceCount, link: r.link });
       sections.push(`**[${sourceCount}] ${r.title}**`);
       sections.push(`URL: ${r.link}`);
       if (r.snippet) sections.push(`Snippet: ${r.snippet}`);
@@ -116,7 +138,7 @@ function buildContext(searchResults: SubQueryResult[]): { context: string; sourc
     truncated = true;
   }
 
-  return { context, sourceCount, truncated };
+  return { context, sourceCount, truncated, gotoSources };
 }
 
 // ── Step 4: synthesize report ─────────────────────────────────────────────────
@@ -176,7 +198,8 @@ export async function runDeepResearch(
   const searchResults = await runSearches(subQueries, resultsPerQuery, api, country);
 
   // Step 3
-  const { context, sourceCount } = buildContext(searchResults);
+  const { context, sourceCount, gotoSources } = buildContext(searchResults);
+  const resolveErrors = [...new Set(searchResults.map((s) => s.resolveError).filter((e): e is string => Boolean(e)))];
 
   if (!sourceCount) {
     throw new Error('No search results found for this query. Try broadening your research question.');
@@ -193,5 +216,21 @@ export async function runDeepResearch(
     sourceCount,
     provider,
     model,
+    gotoSources,
+    resolveErrors,
   };
+}
+
+/** Footer listing cited sources whose URL is still a Google redirect. Empty when there are none. */
+export function deepResearchLinkFooter(result: Pick<ResearchResult, 'gotoSources' | 'resolveErrors'>): string {
+  const { gotoSources, resolveErrors } = result;
+  if (!gotoSources.length) return '';
+  return [
+    '', '', '---',
+    `> ⚠️ **${gotoSources.length} source URL(s) are still Google redirects** (\`google.com/goto?…\`), not real URLs: ` +
+      gotoSources.map((s) => `[${s.n}]`).join(', ') + '.',
+    ...resolveErrors.map((e) => `> /resolve failed: ${e}`),
+    '> Call `resolve_links` with these links to get the real URLs:',
+    ...gotoSources.map((s) => `> - [${s.n}] ${s.link}`),
+  ].join('\n');
 }

@@ -6,9 +6,9 @@ import assert from 'node:assert/strict';
 import { SearchTools } from '../dist/tools/SearchTools.js';
 
 describe('SearchTools', () => {
-  it('exposes 14 tools including the v3.1/v3.2 additions', () => {
+  it('exposes 15 tools including the v3.1/v3.2 additions and resolve_links', () => {
     const names = SearchTools.getAllTools().map((tool) => tool.name);
-    assert.equal(names.length, 14);
+    assert.equal(names.length, 15);
     for (const name of [
       'search', 'search_web', 'search_images', 'search_videos', 'search_news', 'search_shopping',
       'search_places', 'search_scholar', 'search_patents', 'autocomplete', 'scrape', 'search_many', 'deep_research', 'search_rag_context',

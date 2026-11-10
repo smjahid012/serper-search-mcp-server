@@ -141,6 +141,81 @@ var init_HttpRetry = __esm({
   }
 });
 
+// src/utils/LinkResolution.ts
+function countGotoLinks(node) {
+  if (typeof node === "string") return isGotoLink(node) ? 1 : 0;
+  if (Array.isArray(node)) return node.reduce((n, x) => n + countGotoLinks(x), 0);
+  if (node && typeof node === "object") {
+    return Object.values(node).reduce((n, x) => n + countGotoLinks(x), 0);
+  }
+  return 0;
+}
+function defaultLinkMode() {
+  const env = process.env.SERPER_LINK_RESOLUTION;
+  return env && LINK_MODES.includes(env) ? env : "auto";
+}
+function defaultResolveMaxWaitS() {
+  const v = parseInt(process.env.SERPER_RESOLVE_MAX_WAIT ?? "", 10);
+  return Number.isFinite(v) && v >= 0 ? v : 60;
+}
+function shownGotoCount(data, searchType, maxResults, verbosity = "auto") {
+  const main2 = {
+    web: data.organic,
+    images: data.images,
+    videos: data.videos,
+    news: data.news,
+    shopping: data.shopping,
+    places: data.places,
+    scholar: data.organic,
+    patents: data.patents ?? data.organic,
+    autocomplete: void 0
+  };
+  let n = countGotoLinks((main2[searchType] ?? []).slice(0, maxResults));
+  if (searchType === "web" && verbosity !== "compact") {
+    n += countGotoLinks([
+      data.answerBox?.link,
+      data.knowledgeGraph?.website,
+      ...(data.peopleAlsoAsk ?? []).slice(0, 4).map((p) => p.link)
+    ]);
+  }
+  return n;
+}
+function checkResolveShape(sent, out) {
+  if (!out || typeof out !== "object" || Array.isArray(out)) {
+    throw new Error("/resolve returned a non-object reply");
+  }
+  const o = out;
+  for (const [k, v] of Object.entries(sent)) {
+    if (Array.isArray(v) && (!Array.isArray(o[k]) || o[k].length !== v.length)) {
+      throw new Error(`/resolve reply is missing or changed "${k}" (sent ${v.length} items)`);
+    }
+  }
+}
+function unresolvedNote({ unresolved, searchId, retryAfter, resolveError }) {
+  if (!unresolved) return "";
+  const parts = [
+    `
+
+> \u26A0\uFE0F **${unresolved} of the links above are Google redirects** (\`google.com/goto?\u2026\`), not real URLs. Opening them right after the search lands on Google's "Verifying your request" page.`
+  ];
+  if (resolveError) parts.push(`> /resolve failed: ${resolveError}`);
+  if (searchId) {
+    parts.push(
+      `> Call \`resolve_links\` with \`search_id: "${searchId}"\` to get the real URLs (free, ~30 s after the search${retryAfter ? `; Serper suggested waiting ${retryAfter} s before retrying` : ""}).`
+    );
+  }
+  return parts.join("\n");
+}
+var LINK_MODES, GOTO_RE, isGotoLink;
+var init_LinkResolution = __esm({
+  "src/utils/LinkResolution.ts"() {
+    "use strict";
+    LINK_MODES = ["auto", "all", "none"];
+    GOTO_RE = /^https?:\/\/(www\.)?google\.[a-z.]+\/goto\?/i;
+    isGotoLink = (s) => typeof s === "string" && GOTO_RE.test(s);
+  }
+});
+
 // src/utils/TtlCache.ts
 var import_node_fs, import_node_path, TtlCache;
 var init_TtlCache = __esm({
@@ -290,15 +365,17 @@ function buildSearchBody(query, options) {
   if (options.safesearch === "off") body.safe = "off";
   if (options.summary) body.summary = true;
   if (options.page && options.page > 1) body.page = options.page;
+  if (options.link_resolution === "none") body.resolveLinks = false;
   return body;
 }
-var import_node_os, import_node_path2, ENDPOINT_MAP, SCRAPE_ENDPOINT, SerperAPI;
+var import_node_os, import_node_path2, ENDPOINT_MAP, SCRAPE_ENDPOINT, RESOLVE_ENDPOINT, RESOLVE_TIMEOUT_MS, LOCAL_FIELDS, SerperAPI;
 var init_SerperAPI = __esm({
   "src/api/SerperAPI.ts"() {
     "use strict";
     import_node_os = __toESM(require("node:os"));
     import_node_path2 = __toESM(require("node:path"));
     init_HttpRetry();
+    init_LinkResolution();
     init_TtlCache();
     init_Logger();
     init_Metrics();
@@ -314,6 +391,9 @@ var init_SerperAPI = __esm({
       autocomplete: "https://google.serper.dev/autocomplete"
     };
     SCRAPE_ENDPOINT = "https://scrape.serper.dev";
+    RESOLVE_ENDPOINT = "https://google.serper.dev/resolve";
+    RESOLVE_TIMEOUT_MS = 12e4;
+    LOCAL_FIELDS = ["retryAfter", "credits", "provider", "cache_hit"];
     SerperAPI = class {
       constructor(apiKey, options = {}) {
         this.apiKey = apiKey;
@@ -367,7 +447,36 @@ var init_SerperAPI = __esm({
         this.scrapeCache?.set(cacheKey, data);
         return data;
       }
-      async post(url, body) {
+      /**
+       * POST `payload` (a search response or {links:[...]}) to /resolve. If links
+       * remain unresolved, wait Serper's `retryAfter` and re-send the partial
+       * result, but only while the wait plus another request still fits in
+       * `maxWaitS` (Serper has been seen to suggest 90 s, so with the 60 s default
+       * this is usually a single call).
+       * Throws on HTTP errors or a reply whose result arrays went missing.
+       */
+      async resolve(payload, maxWaitS = defaultResolveMaxWaitS()) {
+        const deadline = Date.now() + maxWaitS * 1e3;
+        let current2 = payload;
+        for (let attempts = 1; ; attempts++) {
+          const body = Object.fromEntries(Object.entries(current2).filter(([k]) => !LOCAL_FIELDS.includes(k)));
+          const started = Date.now();
+          const out = await this.post(RESOLVE_ENDPOINT, body, {
+            timeoutMs: Math.max(this.timeoutMs, RESOLVE_TIMEOUT_MS),
+            errorPrefix: "Serper /resolve error"
+          });
+          checkResolveShape(body, out);
+          const requestMs = Date.now() - started;
+          const unresolved = countGotoLinks(out);
+          const retryAfter = typeof out.retryAfter === "number" ? out.retryAfter : null;
+          if (!unresolved || retryAfter === null || Date.now() + retryAfter * 1e3 + requestMs > deadline) {
+            return { data: out, unresolved, retryAfter: unresolved ? retryAfter : null, attempts };
+          }
+          await new Promise((r) => setTimeout(r, retryAfter * 1e3));
+          current2 = out;
+        }
+      }
+      async post(url, body, overrides = {}) {
         const response = await fetchWithRetry(
           url,
           {
@@ -379,10 +488,10 @@ var init_SerperAPI = __esm({
             body: JSON.stringify(body)
           },
           {
-            timeoutMs: this.timeoutMs,
+            timeoutMs: overrides.timeoutMs ?? this.timeoutMs,
             retries: this.retries,
             baseDelayMs: this.baseDelayMs,
-            errorPrefix: "Serper API error"
+            errorPrefix: overrides.errorPrefix ?? "Serper API error"
           }
         );
         return response.json();
@@ -1224,6 +1333,7 @@ var init_Concurrency = __esm({
 // src/tools/DeepResearch.ts
 var DeepResearch_exports = {};
 __export(DeepResearch_exports, {
+  deepResearchLinkFooter: () => deepResearchLinkFooter,
   runDeepResearch: () => runDeepResearch
 });
 async function generateSubQueries(query, count) {
@@ -1249,10 +1359,18 @@ async function runSearches(subQueries, resultsPerQuery, api, country) {
   const searches = subQueries.map((sq) => async () => {
     try {
       const data = await api.search(sq, "web", { num_results: resultsPerQuery, country });
-      return {
-        subQuery: sq,
-        results: (data.organic ?? []).slice(0, resultsPerQuery)
-      };
+      let results = (data.organic ?? []).slice(0, resultsPerQuery);
+      let resolveError;
+      if (countGotoLinks(results)) {
+        try {
+          const r = await api.resolve({ links: results.map((x) => x.link) });
+          const links = r.data["links"];
+          results = results.map((x, i) => typeof links[i] === "string" ? { ...x, link: links[i] } : x);
+        } catch (err) {
+          resolveError = err instanceof Error ? err.message : String(err);
+        }
+      }
+      return { subQuery: sq, results, resolveError };
     } catch {
       return { subQuery: sq, results: [] };
     }
@@ -1261,6 +1379,7 @@ async function runSearches(subQueries, resultsPerQuery, api, country) {
 }
 function buildContext(searchResults) {
   const sections = [];
+  const gotoSources = [];
   let sourceCount = 0;
   for (const { subQuery, results } of searchResults) {
     if (!results.length) continue;
@@ -1268,6 +1387,7 @@ function buildContext(searchResults) {
 `);
     for (const r of results) {
       sourceCount++;
+      if (isGotoLink(r.link)) gotoSources.push({ n: sourceCount, link: r.link });
       sections.push(`**[${sourceCount}] ${r.title}**`);
       sections.push(`URL: ${r.link}`);
       if (r.snippet) sections.push(`Snippet: ${r.snippet}`);
@@ -1281,7 +1401,7 @@ function buildContext(searchResults) {
     context = context.slice(0, MAX_RESEARCH_CONTEXT_CHARS) + "\n\n\u2026[context truncated to 12k chars]";
     truncated = true;
   }
-  return { context, sourceCount, truncated };
+  return { context, sourceCount, truncated, gotoSources };
 }
 async function synthesizeReport(query, context, depth) {
   const depthInstructions = {
@@ -1315,7 +1435,8 @@ async function runDeepResearch(query, depth = "standard", country = "US", api) {
   const { subQueries: subQueryCount, resultsPerQuery } = DEPTH_CONFIG[depth] ?? DEPTH_CONFIG.standard;
   const subQueries = await generateSubQueries(query, subQueryCount);
   const searchResults = await runSearches(subQueries, resultsPerQuery, api, country);
-  const { context, sourceCount } = buildContext(searchResults);
+  const { context, sourceCount, gotoSources } = buildContext(searchResults);
+  const resolveErrors = [...new Set(searchResults.map((s) => s.resolveError).filter((e) => Boolean(e)))];
   if (!sourceCount) {
     throw new Error("No search results found for this query. Try broadening your research question.");
   }
@@ -1327,8 +1448,23 @@ async function runDeepResearch(query, depth = "standard", country = "US", api) {
     subQueries,
     sourceCount,
     provider,
-    model
+    model,
+    gotoSources,
+    resolveErrors
   };
+}
+function deepResearchLinkFooter(result) {
+  const { gotoSources, resolveErrors } = result;
+  if (!gotoSources.length) return "";
+  return [
+    "",
+    "",
+    "---",
+    `> \u26A0\uFE0F **${gotoSources.length} source URL(s) are still Google redirects** (\`google.com/goto?\u2026\`), not real URLs: ` + gotoSources.map((s) => `[${s.n}]`).join(", ") + ".",
+    ...resolveErrors.map((e) => `> /resolve failed: ${e}`),
+    "> Call `resolve_links` with these links to get the real URLs:",
+    ...gotoSources.map((s) => `> - [${s.n}] ${s.link}`)
+  ].join("\n");
 }
 var DEPTH_CONFIG, MAX_RESEARCH_CONTEXT_CHARS;
 var init_DeepResearch = __esm({
@@ -1336,6 +1472,7 @@ var init_DeepResearch = __esm({
     "use strict";
     init_LLMClient();
     init_Concurrency();
+    init_LinkResolution();
     DEPTH_CONFIG = {
       basic: { subQueries: 3, resultsPerQuery: 3 },
       standard: { subQueries: 5, resultsPerQuery: 5 },
@@ -1409,17 +1546,25 @@ function paaChunks(data, startIndex) {
     };
   });
 }
-async function buildRAGContext(query, options, api) {
+async function buildRAGContext(query, options, api, links) {
   const {
     num_results = 10,
     country = "US",
     freshness,
     max_chunk_words = 200,
     include_paa = true,
-    output_format = "json"
+    output_format = "json",
+    link_resolution = "auto"
   } = options;
   const chunkWords = Math.min(1e3, Math.max(50, Math.floor(Number(max_chunk_words)) || 200));
-  const data = await api.search(query, "web", { num_results, country, freshness, autocorrect: true });
+  const data = await api.search(query, "web", { num_results, country, freshness, autocorrect: true, link_resolution });
+  const render = (d, state) => renderRAG(query, d, chunkWords, include_paa, output_format, state);
+  if (!links) return render(data, { unresolved: 0, searchId: null, retryAfter: null });
+  const countShown = (d) => countGotoLinks(d.organic ?? []) + (include_paa ? countGotoLinks((d.peopleAlsoAsk ?? []).slice(0, 4).map((p) => p.link)) : 0);
+  const r = await links.apply(data, { mode: link_resolution, countShown, render });
+  return render(r.data, r);
+}
+function renderRAG(query, data, chunkWords, include_paa, output_format, state) {
   const organic = data.organic ?? [];
   const mainChunks = buildChunks(organic, chunkWords, true);
   const paa = include_paa ? paaChunks(data, mainChunks.length) : [];
@@ -1432,6 +1577,12 @@ async function buildRAGContext(query, options, api) {
     total_words: totalWords,
     chunks: allChunks
   };
+  if (state.unresolved) {
+    result.unresolved_links = state.unresolved;
+    result.search_id = state.searchId;
+    result.note = "Some URLs are google.com/goto redirects; call resolve_links with search_id to get real URLs.";
+    if (state.resolveError) result.resolve_error = state.resolveError;
+  }
   if (output_format === "text") {
     const lines = [
       `# RAG Context: "${query}"`,
@@ -1445,13 +1596,14 @@ async function buildRAGContext(query, options, api) {
       lines.push(c.text);
       lines.push("");
     }
-    return lines.join("\n");
+    return lines.join("\n") + unresolvedNote(state);
   }
   return JSON.stringify(result, null, 2);
 }
 var init_RAGContext = __esm({
   "src/tools/RAGContext.ts"() {
     "use strict";
+    init_LinkResolution();
   }
 });
 
@@ -1464,7 +1616,7 @@ module.exports = __toCommonJS(index_exports);
 
 // src/server/SerperMCPServer.ts
 var import_node_http = require("node:http");
-var import_node_crypto = require("node:crypto");
+var import_node_crypto2 = require("node:crypto");
 var import_server = require("@modelcontextprotocol/sdk/server/index.js");
 var import_stdio = require("@modelcontextprotocol/sdk/server/stdio.js");
 var import_streamableHttp = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
@@ -1473,6 +1625,132 @@ init_SerperAPI();
 
 // src/tools/SearchTools.ts
 init_errors();
+init_LinkResolution();
+
+// src/tools/ResolveLinks.ts
+var import_node_crypto = require("node:crypto");
+init_errors();
+init_LinkResolution();
+var SEARCH_CACHE_MAX = 50;
+var RESOLVE_MAX_LINKS = 100;
+var errMsg = (err) => err instanceof Error ? err.message : String(err);
+var LinkResolver = class {
+  constructor(api) {
+    // Recent searches that still contain goto links, so resolve_links can finish
+    // them later without the caller re-sending the raw response. In HTTP mode
+    // one resolver serves every client, so ids are random 128-bit tokens: an id
+    // cannot be guessed from another one, and one from before a restart cannot
+    // match a different search afterwards.
+    this.searches = /* @__PURE__ */ new Map();
+    this.api = api;
+  }
+  /** Apply the link-resolution mode to a search response. Never throws on /resolve failure. */
+  async apply(data, ctx) {
+    const res = {
+      data,
+      unresolved: ctx.countShown(data),
+      retryAfter: null,
+      resolveError: null,
+      searchId: null
+    };
+    if (ctx.mode === "all" && res.unresolved) {
+      try {
+        const r = await this.api.resolve(data);
+        res.data = { ...r.data, credits: data.credits, provider: data.provider, cache_hit: data.cache_hit };
+        res.unresolved = ctx.countShown(res.data);
+        res.retryAfter = r.retryAfter;
+      } catch (err) {
+        res.resolveError = errMsg(err);
+      }
+    }
+    if (res.unresolved && ctx.remember !== false) {
+      res.searchId = this.remember({ data: res.data, countShown: ctx.countShown, render: ctx.render });
+    }
+    return res;
+  }
+  remember(entry) {
+    const id = (0, import_node_crypto.randomBytes)(16).toString("base64url");
+    this.searches.set(id, entry);
+    while (this.searches.size > SEARCH_CACHE_MAX) {
+      this.searches.delete(this.searches.keys().next().value);
+    }
+    return id;
+  }
+  /** resolve_links tool: by search_id (re-renders that search) or by a list of goto links. */
+  async resolveLinksTool(args) {
+    const maxWait = Math.min(Math.max(Number(args["max_wait_seconds"] ?? defaultResolveMaxWaitS()) || 0, 0), 300);
+    if (Array.isArray(args["links"]) && args["links"].length) {
+      const links = args["links"].map(String);
+      const gotoIdx = links.map((l, i) => isGotoLink(l) ? i : -1).filter((i) => i >= 0);
+      const resolved = /* @__PURE__ */ new Map();
+      let unresolved = 0;
+      let retryAfter2 = null;
+      if (gotoIdx.length) {
+        const r = await this.api.resolve({ links: gotoIdx.map((i) => links[i]) }, maxWait);
+        const out = r.data["links"];
+        gotoIdx.forEach((i, j) => resolved.set(i, String(out[j])));
+        unresolved = r.unresolved;
+        retryAfter2 = r.retryAfter;
+      }
+      const lines = [`## \u{1F517} Resolved ${gotoIdx.length - unresolved} of ${gotoIdx.length} Google redirect link(s) (free)
+`];
+      links.forEach((l, i) => {
+        const r = resolved.get(i);
+        if (r === void 0) lines.push(`${i + 1}. ${l} (not a Google redirect link; unchanged)`);
+        else if (isGotoLink(r)) lines.push(`${i + 1}. \u23F3 not resolved yet: ${l}`);
+        else lines.push(`${i + 1}. ${r}`);
+      });
+      if (unresolved) {
+        lines.push(
+          `
+${unresolved} still unresolved. Call resolve_links again with the same links${retryAfter2 ? ` after ${retryAfter2} s (Serper's suggestion)` : " later"}.`
+        );
+      }
+      return lines.join("\n");
+    }
+    const id = String(args["search_id"]).trim();
+    const entry = this.searches.get(id);
+    if (!entry) {
+      throw new ValidationError(
+        `unknown search_id "${id}" (evicted, or from an earlier server process); re-run the search or pass links`
+      );
+    }
+    const before = entry.countShown(entry.data);
+    let attempts = 0;
+    let retryAfter = null;
+    if (countGotoLinks(entry.data)) {
+      const r = await this.api.resolve(entry.data, maxWait);
+      entry.data = { ...r.data, credits: entry.data.credits, provider: entry.data.provider, cache_hit: entry.data.cache_hit };
+      attempts = r.attempts;
+      retryAfter = r.retryAfter;
+    }
+    const after = entry.countShown(entry.data);
+    const credits = entry.data.credits;
+    const status = `> Resolved ${before - after} of ${before} Google redirect link(s) shown (/resolve is free, ${attempts} call(s)${credits !== void 0 ? `; the original search used ${credits} credit(s)` : ""}).
+
+`;
+    return status + entry.render(
+      { ...entry.data, credits: void 0 },
+      { unresolved: after, searchId: after ? id : null, retryAfter }
+    );
+  }
+  static validateArgs(a) {
+    const hasId = typeof a["search_id"] === "string" && a["search_id"].trim() !== "";
+    const hasLinks = Array.isArray(a["links"]) && a["links"].length > 0;
+    if (hasId === hasLinks) throw new ValidationError("pass exactly one of search_id or links");
+    if (hasLinks) {
+      const links = a["links"];
+      if (links.length > RESOLVE_MAX_LINKS) throw new ValidationError(`at most ${RESOLVE_MAX_LINKS} links per call`);
+      if (!links.every((l) => typeof l === "string")) throw new ValidationError("links must be strings");
+    }
+    if (a["max_wait_seconds"] !== void 0) {
+      const n = Number(a["max_wait_seconds"]);
+      if (!Number.isFinite(n) || n < 0 || n > 300) throw new ValidationError("max_wait_seconds must be 0-300");
+    }
+  }
+};
+
+// src/tools/SearchTools.ts
 var SearchTools = class {
   static getAllTools() {
     return [
@@ -1489,7 +1767,8 @@ var SearchTools = class {
       this.scrapeTool(),
       this.batchSearch(),
       this.deepResearch(),
-      this.ragContext()
+      this.ragContext(),
+      this.resolveLinksTool()
     ];
   }
   static localeParams() {
@@ -1533,6 +1812,15 @@ var SearchTools = class {
       }
     };
   }
+  static linkResolution() {
+    return {
+      link_resolution: {
+        type: "string",
+        enum: [...LINK_MODES],
+        description: 'Google result links beyond the top 3 may come back as google.com/goto redirects. "auto" (default): top 3 resolved, any leftover goto links get a search_id for resolve_links. "all": also resolve every link now (free, but adds ~30 s when goto links are present). "none": fastest, links exactly as Google returns them.'
+      }
+    };
+  }
   static unifiedSearch() {
     return {
       name: "search",
@@ -1551,7 +1839,8 @@ var SearchTools = class {
           ...this.localeParams(),
           ...this.freshness(),
           ...this.safesearch(),
-          ...this.verbosityParam()
+          ...this.verbosityParam(),
+          ...this.linkResolution()
         },
         required: ["query"]
       }
@@ -1572,7 +1861,8 @@ var SearchTools = class {
           ...this.verbosityParam(),
           autocorrect: { type: "boolean", description: "Auto-correct spelling. Default: true.", default: true },
           summary: { type: "boolean", description: "Request Serper AI summary. Default: false.", default: false },
-          page: { type: "number", description: "Page number for pagination. Default: 1.", minimum: 1, default: 1 }
+          page: { type: "number", description: "Page number for pagination. Default: 1.", minimum: 1, default: 1 },
+          ...this.linkResolution()
         },
         required: ["query"]
       }
@@ -1594,7 +1884,8 @@ var SearchTools = class {
           orientation: { type: "string", description: "Aspect filter (client-side via W\xD7H).", enum: ["landscape", "portrait", "square"] },
           color: { type: "string", description: "Dominant color filter (e.g. blue, red, green)." },
           site: { type: "string", description: "Restrict to domain (e.g. dribbble.com, behance.net, unsplash.com)." },
-          layout: { type: "string", description: "list (default) or gallery (renderable ![thumb] grid).", enum: ["list", "gallery"], default: "list" }
+          layout: { type: "string", description: "list (default) or gallery (renderable ![thumb] grid).", enum: ["list", "gallery"], default: "list" },
+          ...this.linkResolution()
         },
         required: ["query"]
       }
@@ -1611,7 +1902,8 @@ var SearchTools = class {
           ...this.numResults(),
           ...this.localeParams(),
           ...this.freshness(),
-          ...this.safesearch()
+          ...this.safesearch(),
+          ...this.linkResolution()
         },
         required: ["query"]
       }
@@ -1628,7 +1920,8 @@ var SearchTools = class {
           ...this.numResults(),
           ...this.localeParams(),
           ...this.freshness("pd"),
-          ...this.safesearch()
+          ...this.safesearch(),
+          ...this.linkResolution()
         },
         required: ["query"]
       }
@@ -1643,7 +1936,8 @@ var SearchTools = class {
         properties: {
           query: { type: "string", description: "Product or shopping query." },
           ...this.numResults(),
-          ...this.localeParams()
+          ...this.localeParams(),
+          ...this.linkResolution()
         },
         required: ["query"]
       }
@@ -1820,9 +2114,25 @@ var SearchTools = class {
             description: '"json" (structured, for vector DBs) or "text" (plain blocks, for direct prompt use). Default: "json".',
             enum: ["json", "text"],
             default: "json"
-          }
+          },
+          ...this.linkResolution()
         },
         required: ["query"]
+      }
+    };
+  }
+  static resolveLinksTool() {
+    return {
+      name: "resolve_links",
+      description: "Turn google.com/goto redirect links from a recent search into real URLs via Serper /resolve (free, 0 credits). Pass the search_id a search result asked for, or a list of goto links. Right after a search one call takes ~20\u201330 s. Links not ready yet stay goto links; Serper then suggests a wait (often 90 s), which is only honoured if it fits in max_wait_seconds \u2014 otherwise call again later.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          search_id: { type: "string", description: "search_id shown in a search result that still had goto links." },
+          links: { type: "array", items: { type: "string" }, description: "google.com/goto?url=\u2026 links to resolve (alternative to search_id, max 100).", maxItems: 100 },
+          max_wait_seconds: { type: "number", description: "Retry within this budget when Serper says to wait (default 60).", minimum: 0, maximum: 300, default: 60 }
+        },
+        required: []
       }
     };
   }
@@ -1869,6 +2179,10 @@ var SearchTools = class {
         throw new ValidationError("provider must be auto|serper|tavily|brave|exa|firecrawl|all");
       }
     }
+    if (a["link_resolution"] !== void 0 && !LINK_MODES.includes(a["link_resolution"])) {
+      throw new ValidationError(`link_resolution must be ${LINK_MODES.join("|")}`);
+    }
+    if (toolName === "resolve_links") LinkResolver.validateArgs(a);
     if (a["max_chars"] !== void 0) {
       const n = Number(a["max_chars"]);
       if (!Number.isFinite(n) || n < 0) throw new ValidationError("max_chars must be >= 0");
@@ -1957,6 +2271,8 @@ async function runBatchSearch(queries, options, api) {
 }
 
 // src/server/SerperMCPServer.ts
+init_LinkResolution();
+init_DeepResearch();
 init_Logger();
 init_errors();
 init_Metrics();
@@ -1966,7 +2282,7 @@ var version = "4.0.1";
 
 // src/server/SerperMCPServer.ts
 if (!globalThis.crypto) {
-  globalThis.crypto = import_node_crypto.webcrypto;
+  globalThis.crypto = import_node_crypto2.webcrypto;
 }
 var SEARCH_TYPE_MAP = {
   search: "web",
@@ -1989,7 +2305,7 @@ function isAuthorized(authorization, token) {
   const b = Buffer.from(expected, "utf8");
   if (a.length !== b.length) return false;
   try {
-    return (0, import_node_crypto.timingSafeEqual)(a, b);
+    return (0, import_node_crypto2.timingSafeEqual)(a, b);
   } catch {
     return false;
   }
@@ -2008,6 +2324,7 @@ var SerperMCPServer = class {
     if (!this.config.apiKey) throw new AuthError("SERPER_API_KEY is required");
     this.api = new SerperAPI(this.config.apiKey);
     this.router = new ProviderRouter(this.api);
+    this.links = new LinkResolver(this.api);
   }
   /**
    * Build a fully-configured MCP server instance.
@@ -2026,13 +2343,17 @@ var SerperMCPServer = class {
       tools: SearchTools.getAllTools()
     }));
     server.setRequestHandler(import_types.CallToolRequestSchema, async (req) => {
-      setRequestId((0, import_node_crypto.randomUUID)().slice(0, 8));
+      setRequestId((0, import_node_crypto2.randomUUID)().slice(0, 8));
       const { name, arguments: args } = req.params;
-      const knownTool = name in SEARCH_TYPE_MAP || name === "deep_research" || name === "search_rag_context" || name === "scrape" || name === "search_many" || name === "search_maps" || name === "search_reviews" || name === "search_lens";
+      const knownTool = name in SEARCH_TYPE_MAP || name === "deep_research" || name === "search_rag_context" || name === "scrape" || name === "search_many" || name === "search_maps" || name === "search_reviews" || name === "search_lens" || name === "resolve_links";
       if (!knownTool) throw new import_types.McpError(import_types.ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
       try {
         SearchTools.validateArgs(name, args);
         const a = args;
+        if (name === "resolve_links") {
+          const text = await this.links.resolveLinksTool(a);
+          return { content: [{ type: "text", text }] };
+        }
         if (name === "scrape") {
           const url = a["url"];
           const maxChars = Math.min(2e5, Math.max(1e3, Math.floor(Number(a["max_chars"])) || 5e4));
@@ -2077,7 +2398,7 @@ var SerperMCPServer = class {
             "---",
             ""
           ].join("\n");
-          return { content: [{ type: "text", text: header + result.report }] };
+          return { content: [{ type: "text", text: header + result.report + deepResearchLinkFooter(result) }] };
         }
         if (name === "search_rag_context") {
           const text = await buildRAGContext(
@@ -2088,9 +2409,11 @@ var SerperMCPServer = class {
               freshness: a["freshness"],
               max_chunk_words: a["max_chunk_words"] ?? 200,
               include_paa: a["include_paa"] ?? true,
-              output_format: a["output_format"] ?? "json"
+              output_format: a["output_format"] ?? "json",
+              link_resolution: a["link_resolution"] ?? defaultLinkMode()
             },
-            this.api
+            this.api,
+            this.links
           );
           return { content: [{ type: "text", text }] };
         }
@@ -2137,18 +2460,25 @@ ${hint}` }] };
       verbosity,
       max_chars: maxChars,
       snippets_only: args["snippets_only"] ?? false,
-      provider: args["provider"] ?? "auto"
+      provider: args["provider"] ?? "auto",
+      link_resolution: args["link_resolution"] ?? defaultLinkMode()
     };
     let query = args["query"];
     if (searchType === "images" && typeof args["site"] === "string" && args["site"]) {
       query = `site:${args["site"]} ${query}`;
     }
     const data = await this.router.search(query, searchType, opts);
-    const text = searchType === "places" ? this.formatPlacesWithFilters(data, numResults, args, maxChars) : ResultFormatter.format(data, numResults, searchType, {
+    const render = (d) => searchType === "places" ? this.formatPlacesWithFilters(d, numResults, args, maxChars) : ResultFormatter.format(d, numResults, searchType, {
       verbosity,
       maxChars,
       snippetsOnly: opts.snippets_only
     });
+    const r = await this.links.apply(data, {
+      mode: opts.link_resolution ?? "auto",
+      countShown: (d) => shownGotoCount(d, searchType, numResults, verbosity),
+      render: (d, state) => render(d) + unresolvedNote(state)
+    });
+    const text = render(r.data) + unresolvedNote(r);
     return { content: [{ type: "text", text }] };
   }
   formatPlacesWithFilters(data, numResults, args, maxChars) {
@@ -2179,7 +2509,7 @@ ${hint}` }] };
   async runHttp() {
     const MAX_BODY_BYTES = 256 * 1024;
     const httpServer = (0, import_node_http.createServer)(async (req, res) => {
-      setRequestId((0, import_node_crypto.randomUUID)().slice(0, 8));
+      setRequestId((0, import_node_crypto2.randomUUID)().slice(0, 8));
       try {
         const contentLength = Number(req.headers["content-length"]);
         if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
@@ -2272,6 +2602,9 @@ var KNOWN_ENV = /* @__PURE__ */ new Set([
   "SERPER_RETRY_BASE_MS",
   "SERPER_LLM_TIMEOUT_MS",
   "SERPER_LLM_RETRIES",
+  // Google redirect-link resolution
+  "SERPER_LINK_RESOLUTION",
+  "SERPER_RESOLVE_MAX_WAIT",
   // provider routing
   "SEARCH_PROVIDER_ORDER",
   "SEARCH_FALLBACK"
@@ -2297,6 +2630,10 @@ function validateEnv(env = process.env) {
   const port = env.SERPER_MCP_PORT;
   if (port !== void 0 && port !== "" && !(Number.isInteger(Number(port)) && Number(port) > 0 && Number(port) <= 65535)) {
     warnings.push(`SERPER_MCP_PORT must be an integer 1-65535 (got "${port}") \u2014 falling back to 8080`);
+  }
+  const linkMode = env.SERPER_LINK_RESOLUTION;
+  if (linkMode && !["auto", "all", "none"].includes(linkMode)) {
+    warnings.push(`SERPER_LINK_RESOLUTION must be auto|all|none (got "${linkMode}") \u2014 falling back to auto`);
   }
   const order = env.SEARCH_PROVIDER_ORDER;
   if (order) {
@@ -2447,6 +2784,8 @@ Environment variables:
   SERPER_CACHE_TTL_MS      Search-result cache TTL (default 600000, 0 = disabled)
   SERPER_TIMEOUT_MS        Per-request timeout (default 30000)
   SERPER_RETRIES           Retries on 429/5xx/network errors (default 2)
+  SERPER_LINK_RESOLUTION   Default link_resolution: auto | all | none (default auto)
+  SERPER_RESOLVE_MAX_WAIT  Seconds /resolve may keep retrying when Serper says to wait (default 60)
   TAVILY_API_KEY           Fallback provider 1 (reranked)
   BRAVE_API_KEY            Fallback provider 2 (independent index)
   EXA_API_KEY              Fallback provider 3 (neural)
@@ -2471,6 +2810,7 @@ Tools provided:
   search_many        Batch: 1\u201310 parallel searches with dedupe (max_credits guard)
   deep_research      Multi-step research: sub-queries, parallel search, LLM report (basic 3cr / standard 5cr / deep 8cr)
   search_rag_context Clean chunked text + metadata for RAG/embedding pipelines
+  resolve_links      Turn google.com/goto redirect links into real URLs (free)
 `);
     process.exit(0);
   }

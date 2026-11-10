@@ -9,6 +9,8 @@
 
 import { SerperAPI } from '../api/SerperAPI.js';
 import { OrganicResult, SerperAPIResponse } from '../types/index.js';
+import { LinkMode, UnresolvedState, countGotoLinks, unresolvedNote } from '../utils/LinkResolution.js';
+import type { LinkResolver } from './ResolveLinks.js';
 
 export interface RAGChunk {
   chunk_index: number;
@@ -28,6 +30,10 @@ export interface RAGContextResult {
   total_chunks: number;
   total_words: number;
   chunks: RAGChunk[];
+  unresolved_links?: number;
+  search_id?: string | null;
+  note?: string;
+  resolve_error?: string;
 }
 
 // ── Text cleaning ─────────────────────────────────────────────────────────────
@@ -129,8 +135,10 @@ export async function buildRAGContext(
     max_chunk_words?: number;
     include_paa?: boolean;
     output_format?: 'json' | 'text';
+    link_resolution?: LinkMode;
   },
-  api: SerperAPI
+  api: SerperAPI,
+  links?: LinkResolver
 ): Promise<string> {
   const {
     num_results    = 10,
@@ -139,14 +147,35 @@ export async function buildRAGContext(
     max_chunk_words = 200,
     include_paa     = true,
     output_format   = 'json',
+    link_resolution = 'auto',
   } = options;
 
   // Clamp chunk size: guards against 0/negative values looping forever
   const chunkWords = Math.min(1000, Math.max(50, Math.floor(Number(max_chunk_words)) || 200));
 
-  const data = await api.search(query, 'web', { num_results, country, freshness, autocorrect: true });
-  const organic = data.organic ?? [];
+  const data = await api.search(query, 'web', { num_results, country, freshness, autocorrect: true, link_resolution });
 
+  const render = (d: SerperAPIResponse, state: UnresolvedState) =>
+    renderRAG(query, d, chunkWords, include_paa, output_format, state);
+  if (!links) return render(data, { unresolved: 0, searchId: null, retryAfter: null });
+
+  // Links shown = every organic result + PAA chunks (when included).
+  const countShown = (d: SerperAPIResponse) =>
+    countGotoLinks(d.organic ?? []) +
+    (include_paa ? countGotoLinks((d.peopleAlsoAsk ?? []).slice(0, 4).map((p) => p.link)) : 0);
+  const r = await links.apply(data, { mode: link_resolution, countShown, render });
+  return render(r.data, r);
+}
+
+function renderRAG(
+  query: string,
+  data: SerperAPIResponse,
+  chunkWords: number,
+  include_paa: boolean,
+  output_format: 'json' | 'text',
+  state: UnresolvedState
+): string {
+  const organic = data.organic ?? [];
   const mainChunks = buildChunks(organic, chunkWords, true);
   const paa        = include_paa ? paaChunks(data, mainChunks.length) : [];
   const allChunks  = [...mainChunks, ...paa];
@@ -160,6 +189,12 @@ export async function buildRAGContext(
     total_words:   totalWords,
     chunks:        allChunks,
   };
+  if (state.unresolved) {
+    result.unresolved_links = state.unresolved;
+    result.search_id = state.searchId;
+    result.note = 'Some URLs are google.com/goto redirects; call resolve_links with search_id to get real URLs.';
+    if (state.resolveError) result.resolve_error = state.resolveError;
+  }
 
   if (output_format === 'text') {
     // Plain text format — one chunk per block, easy to paste into a prompt
@@ -175,7 +210,7 @@ export async function buildRAGContext(
       lines.push(c.text);
       lines.push('');
     }
-    return lines.join('\n');
+    return lines.join('\n') + unresolvedNote(state);
   }
 
   // JSON format — structured for vector DB ingestion
