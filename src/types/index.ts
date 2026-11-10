@@ -23,6 +23,8 @@ export interface SearchOptions {
   max_chars?: number;
   snippets_only?: boolean;
   provider?: string;
+  /** Google redirect-link handling: auto (default) · all (call /resolve now) · none (resolveLinks:false). */
+  link_resolution?: 'auto' | 'all' | 'none';
 }
 
 // ── Web / Organic ────────────────────────────────────────────────────────────

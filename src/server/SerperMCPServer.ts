@@ -32,6 +32,9 @@ import { effectiveFetchCount, ResultFormatter } from '../utils/ResultFormatter.j
 import { runDeepResearch, ResearchDepth } from '../tools/DeepResearch.js';
 import { buildRAGContext } from '../tools/RAGContext.js';
 import { runBatchSearch } from '../tools/BatchSearch.js';
+import { LinkResolver } from '../tools/ResolveLinks.js';
+import { LinkMode, defaultLinkMode, shownGotoCount, unresolvedNote } from '../utils/LinkResolution.js';
+import { deepResearchLinkFooter } from '../tools/DeepResearch.js';
 import { setLogLevel, logger, setRequestId } from '../utils/Logger.js';
 import { AuthError, ValidationError } from '../utils/errors.js';
 import { snapshot as metricsSnapshot } from '../utils/Metrics.js';
@@ -72,6 +75,7 @@ export class SerperMCPServer {
   public readonly config: ServerConfig;
   private api: SerperAPI;
   private router: ProviderRouter;
+  private links: LinkResolver;
 
   constructor(options: Partial<ServerConfig> = {}) {
     this.config = {
@@ -89,6 +93,7 @@ export class SerperMCPServer {
 
     this.api = new SerperAPI(this.config.apiKey);
     this.router = new ProviderRouter(this.api);
+    this.links = new LinkResolver(this.api);
   }
 
   /**
@@ -121,12 +126,19 @@ export class SerperMCPServer {
         name === 'search_many' ||
         name === 'search_maps' ||
         name === 'search_reviews' ||
-        name === 'search_lens';
+        name === 'search_lens' ||
+        name === 'resolve_links';
       if (!knownTool) throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
 
       try {
         SearchTools.validateArgs(name, args);
         const a = args as Record<string, unknown>;
+
+        // ── Google redirect links ─────────────────────────────────────────────
+        if (name === 'resolve_links') {
+          const text = await this.links.resolveLinksTool(a);
+          return { content: [{ type: 'text', text }] };
+        }
 
         // ── Scrape ────────────────────────────────────────────────────────────
         if (name === 'scrape') {
@@ -179,7 +191,7 @@ export class SerperMCPServer {
             '',
           ].join('\n');
 
-          return { content: [{ type: 'text', text: header + result.report }] };
+          return { content: [{ type: 'text', text: header + result.report + deepResearchLinkFooter(result) }] };
         }
 
         // ── RAG Context ───────────────────────────────────────────────────────
@@ -193,8 +205,10 @@ export class SerperMCPServer {
               max_chunk_words: (a['max_chunk_words'] as number)  ?? 200,
               include_paa:     (a['include_paa']     as boolean) ?? true,
               output_format:   (a['output_format']   as 'json' | 'text') ?? 'json',
+              link_resolution: (a['link_resolution'] as LinkMode | undefined) ?? defaultLinkMode(),
             },
-            this.api
+            this.api,
+            this.links
           );
           return { content: [{ type: 'text', text }] };
         }
@@ -254,6 +268,7 @@ export class SerperMCPServer {
       max_chars: maxChars,
       snippets_only: (args['snippets_only'] as boolean) ?? false,
       provider: (args['provider'] as string) ?? 'auto',
+      link_resolution: (args['link_resolution'] as LinkMode | undefined) ?? defaultLinkMode(),
     };
 
     // Image discovery filters → query shaping (Serper has no native size/color params)
@@ -263,13 +278,19 @@ export class SerperMCPServer {
     }
 
     const data = await this.router.search(query, searchType, opts);
-    const text = searchType === 'places'
-      ? this.formatPlacesWithFilters(data, numResults, args, maxChars)
-      : ResultFormatter.format(data, numResults, searchType, {
+    const render = (d: typeof data) => searchType === 'places'
+      ? this.formatPlacesWithFilters(d, numResults, args, maxChars)
+      : ResultFormatter.format(d, numResults, searchType, {
           verbosity,
           maxChars,
           snippetsOnly: opts.snippets_only,
         });
+    const r = await this.links.apply(data, {
+      mode: opts.link_resolution ?? 'auto',
+      countShown: (d) => shownGotoCount(d, searchType, numResults, verbosity),
+      render: (d, state) => render(d) + unresolvedNote(state),
+    });
+    const text = render(r.data) + unresolvedNote(r);
     return { content: [{ type: 'text', text }] };
   }
 

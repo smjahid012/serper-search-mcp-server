@@ -35,6 +35,7 @@ This MCP server wraps the [Serper API](https://serper.dev) (Google Search result
 | `search_many` 🆕 | 1–10 parallel web searches with automatic cross-query dedupe |
 | `deep_research` | Multi-step research: auto sub-queries → parallel searches → LLM-synthesized cited report |
 | `search_rag_context` | Clean chunked text with metadata for embedding pipelines & vector DBs — no LLM needed |
+| `resolve_links` 🆕 | Turn `google.com/goto` redirect links from a search into real URLs (free, 0 credits) |
 
 ### Verbosity (token-smart, auto by default)
 
@@ -227,7 +228,8 @@ Google web search with the full SERP breakdown.
   "safesearch":  "moderate",// "off" · "moderate" · "strict"
   "autocorrect": true,
   "summary":     false,     // Serper AI summary
-  "page":        1          // pagination
+  "page":        1,         // pagination
+  "link_resolution": "auto" // "auto" · "all" · "none" — see Google redirect links below
 }
 ```
 
@@ -368,6 +370,29 @@ Duplicate URLs across queries are removed automatically; per-query failures are 
 
 ---
 
+### Google redirect links & `resolve_links` 🆕
+
+Since 2026-10-30, Serper may return Google result links beyond the top 3 as `https://www.google.com/goto?url=…` redirects. Opening one right after the search lands on Google's "Verifying your request" page instead of the site. Serper's free `/resolve` endpoint turns them back into real URLs ([serper.dev/google-links](https://serper.dev/google-links)).
+
+`search`, `search_web`, `search_images`, `search_videos`, `search_news`, `search_shopping` and `search_rag_context` take a `link_resolution` parameter:
+
+| Mode | Behaviour |
+|---|---|
+| `auto` (default) | Serper's default: top 3 resolved. If the shown results still contain redirect links, the output says how many and gives a `search_id`. |
+| `all` | Also calls `/resolve` before returning. Free, but adds ~20–30 s when redirect links are present. |
+| `none` | Sends `resolveLinks: false`: fastest, links exactly as Google returns them. |
+
+`resolve_links` resolves a search later by `search_id` (the last 50 searches with redirect links are kept in memory) or from a list of goto links:
+
+```jsonc
+{ "search_id": "Xq3v…" }                                 // re-renders that search with real URLs
+{ "links": ["https://www.google.com/goto?url=…"], "max_wait_seconds": 60 }
+```
+
+Links that are not ready yet stay goto links and Serper suggests a wait (often 90 s); it is honoured only if it fits in `max_wait_seconds`. `/resolve` failures never fail a search: the original results are kept and the error is shown. `deep_research` resolves its sources before building the prompt and lists any citation that is still a redirect.
+
+---
+
 ## Environment variables
 
 ### Search Providers & Universal Gateway
@@ -401,6 +426,8 @@ Duplicate URLs across queries are removed automatically; per-query failures are 
 | `SERPER_TIMEOUT_MS` | ❌ | `30000` | Per-request timeout for Serper calls in ms |
 | `SERPER_RETRIES` | ❌ | `2` | Retries on 429 / 5xx / network errors (honors `Retry-After`) |
 | `SERPER_RETRY_BASE_MS` | ❌ | `500` | Base backoff delay in ms (exponential backoff + jitter) |
+| `SERPER_LINK_RESOLUTION` | ❌ | `auto` | Default `link_resolution` mode: `auto` · `all` · `none` |
+| `SERPER_RESOLVE_MAX_WAIT` | ❌ | `60` | Seconds `/resolve` may keep retrying when Serper says to wait |
 
 ### Deep Research LLM Synthesis
 
@@ -567,10 +594,11 @@ serper-search-mcp-server/
 │   ├── server/
 │   │   └── SerperMCPServer.ts  ← MCP server, stdio + HTTP transport, bearer auth
 │   ├── tools/
-│   │   ├── SearchTools.ts      ← All 14 tool definitions + validation
+│   │   ├── SearchTools.ts      ← All 15 tool definitions + validation
 │   │   ├── BatchSearch.ts      ← search_many (parallel + dedupe)
 │   │   ├── DeepResearch.ts     ← Multi-step research orchestration
-│   │   └── RAGContext.ts       ← Chunk + metadata formatter
+│   │   ├── RAGContext.ts       ← Chunk + metadata formatter
+│   │   └── ResolveLinks.ts     ← link_resolution modes + resolve_links (Serper /resolve)
 │   ├── types/
 │   │   └── index.ts            ← Full TypeScript types
 │   └── utils/

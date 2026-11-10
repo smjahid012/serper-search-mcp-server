@@ -15,6 +15,7 @@ import {
   SerperAPIResponse,
 } from '../types/index.js';
 import { fetchWithRetry } from '../utils/HttpRetry.js';
+import { checkResolveShape, countGotoLinks, defaultResolveMaxWaitS } from '../utils/LinkResolution.js';
 import { TtlCache } from '../utils/TtlCache.js';
 import { logger } from '../utils/Logger.js';
 import { increment } from '../utils/Metrics.js';
@@ -33,6 +34,25 @@ const ENDPOINT_MAP: Record<SearchType, string> = {
 
 // Scrape lives on its own host (not google.serper.dev)
 const SCRAPE_ENDPOINT = 'https://scrape.serper.dev';
+
+// Turns google.com/goto redirect links back into real URLs (0 credits).
+// One call takes ~20–30 s right after a search, so it gets a longer timeout.
+const RESOLVE_ENDPOINT = 'https://google.serper.dev/resolve';
+const RESOLVE_TIMEOUT_MS = 120_000;
+
+export interface ResolveResult {
+  /** The reply, with links replaced where Serper could resolve them. */
+  data: Record<string, unknown>;
+  /** goto links still present anywhere in `data`. */
+  unresolved: number;
+  /** Serper's suggested wait (s) before retrying, when links remain. */
+  retryAfter: number | null;
+  /** /resolve calls made. */
+  attempts: number;
+}
+
+/** Fields this server adds to a response; never sent to /resolve. */
+const LOCAL_FIELDS = ['retryAfter', 'credits', 'provider', 'cache_hit'];
 
 export interface SerperAPIOptions {
   timeoutMs?: number;
@@ -76,6 +96,7 @@ function buildSearchBody(query: string, options: Partial<SearchOptions>): Record
   if (options.safesearch === 'off') body.safe = 'off';
   if (options.summary) body.summary = true;
   if (options.page && options.page > 1) body.page = options.page;
+  if (options.link_resolution === 'none') body.resolveLinks = false;
 
   return body;
 }
@@ -156,7 +177,41 @@ export class SerperAPI {
     return data;
   }
 
-  private async post<T>(url: string, body: Record<string, unknown>): Promise<T> {
+  /**
+   * POST `payload` (a search response or {links:[...]}) to /resolve. If links
+   * remain unresolved, wait Serper's `retryAfter` and re-send the partial
+   * result, but only while the wait plus another request still fits in
+   * `maxWaitS` (Serper has been seen to suggest 90 s, so with the 60 s default
+   * this is usually a single call).
+   * Throws on HTTP errors or a reply whose result arrays went missing.
+   */
+  async resolve(payload: Record<string, unknown>, maxWaitS = defaultResolveMaxWaitS()): Promise<ResolveResult> {
+    const deadline = Date.now() + maxWaitS * 1000;
+    let current = payload;
+    for (let attempts = 1; ; attempts++) {
+      const body = Object.fromEntries(Object.entries(current).filter(([k]) => !LOCAL_FIELDS.includes(k)));
+      const started = Date.now();
+      const out: unknown = await this.post(RESOLVE_ENDPOINT, body, {
+        timeoutMs: Math.max(this.timeoutMs, RESOLVE_TIMEOUT_MS),
+        errorPrefix: 'Serper /resolve error',
+      });
+      checkResolveShape(body, out);
+      const requestMs = Date.now() - started;
+      const unresolved = countGotoLinks(out);
+      const retryAfter = typeof out.retryAfter === 'number' ? out.retryAfter : null;
+      if (!unresolved || retryAfter === null || Date.now() + retryAfter * 1000 + requestMs > deadline) {
+        return { data: out, unresolved, retryAfter: unresolved ? retryAfter : null, attempts };
+      }
+      await new Promise((r) => setTimeout(r, retryAfter * 1000));
+      current = out;
+    }
+  }
+
+  private async post<T>(
+    url: string,
+    body: Record<string, unknown>,
+    overrides: { timeoutMs?: number; errorPrefix?: string } = {}
+  ): Promise<T> {
     const response = await fetchWithRetry(
       url,
       {
@@ -168,10 +223,10 @@ export class SerperAPI {
         body: JSON.stringify(body),
       },
       {
-        timeoutMs: this.timeoutMs,
+        timeoutMs: overrides.timeoutMs ?? this.timeoutMs,
         retries: this.retries,
         baseDelayMs: this.baseDelayMs,
-        errorPrefix: 'Serper API error',
+        errorPrefix: overrides.errorPrefix ?? 'Serper API error',
       }
     );
 

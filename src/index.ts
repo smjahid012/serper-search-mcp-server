@@ -157,6 +157,8 @@ Environment variables:
   SERPER_CACHE_TTL_MS      Search-result cache TTL (default 600000, 0 = disabled)
   SERPER_TIMEOUT_MS        Per-request timeout (default 30000)
   SERPER_RETRIES           Retries on 429/5xx/network errors (default 2)
+  SERPER_LINK_RESOLUTION   Default link_resolution: auto | all | none (default auto)
+  SERPER_RESOLVE_MAX_WAIT  Seconds /resolve may keep retrying when Serper says to wait (default 60)
   TAVILY_API_KEY           Fallback provider 1 (reranked)
   BRAVE_API_KEY            Fallback provider 2 (independent index)
   EXA_API_KEY              Fallback provider 3 (neural)
@@ -181,6 +183,7 @@ Tools provided:
   search_many        Batch: 1–10 parallel searches with dedupe (max_credits guard)
   deep_research      Multi-step research: sub-queries, parallel search, LLM report (basic 3cr / standard 5cr / deep 8cr)
   search_rag_context Clean chunked text + metadata for RAG/embedding pipelines
+  resolve_links      Turn google.com/goto redirect links into real URLs (free)
 `);
     process.exit(0);
   }

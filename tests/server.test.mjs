@@ -30,11 +30,11 @@ async function connectTestClient(t) {
 }
 
 describe('MCP server integration', () => {
-  it('lists all 14 tools', async (t) => {
+  it('lists all 15 tools', async (t) => {
     const { client } = await connectTestClient(t);
     const { tools } = await client.listTools();
 
-    assert.equal(tools.length, 14);
+    assert.equal(tools.length, 15);
     const names = tools.map((tool) => tool.name);
     assert.ok(names.includes('search'));
     assert.ok(names.includes('scrape'));
