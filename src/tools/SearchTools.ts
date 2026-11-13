@@ -42,7 +42,7 @@ export class SearchTools {
   }
 
   private static freshness(def?: string) {
-    return { freshness: { type: 'string', description: `Time filter: pd=day pw=week pm=month py=year.${def ? ` Default: "${def}".` : ''}`, enum: ['pd','pw','pm','py'] } };
+    return { freshness: { type: 'string', description: `Time filter: pd=past day pw=week pm=month py=year any=none (historical). Pass pd/pw/pm/py whenever the user asks for latest/current/recent results ("today", "this week", "latest", current year); omit or "any" for timeless or historical questions. The response footer echoes the filter that was applied.${def ? ` Default: "${def}".` : ''}`, enum: ['pd','pw','pm','py','any'] } };
   }
 
   private static safesearch() {
@@ -121,7 +121,7 @@ export class SearchTools {
   private static webSearch(): ToolDefinition {
     return {
       name: 'search_web',
-      description: 'Google web search via Serper API. Returns organic results plus Knowledge Graph, Answer Box, People Also Ask, and related searches.',
+      description: 'Google web search via Serper API. Returns organic results plus Knowledge Graph, Answer Box, People Also Ask, and related searches. For latest/current results pass freshness (e.g. py=past year). For a synthesized answer in one call, prefer search_rag_context (fast) or deep_research (thorough) instead of search→scrape chains.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -132,7 +132,6 @@ export class SearchTools {
           ...this.safesearch(),
           ...this.verbosityParam(),
           autocorrect: { type: 'boolean', description: 'Auto-correct spelling. Default: true.', default: true },
-          summary:     { type: 'boolean', description: 'Request Serper AI summary. Default: false.', default: false },
           page:        { type: 'number',  description: 'Page number for pagination. Default: 1.', minimum: 1, default: 1 },
           ...this.linkResolution(),
         },
@@ -153,9 +152,8 @@ export class SearchTools {
           ...this.localeParams(),
           ...this.safesearch(),
           ...this.verbosityParam(),
-          size: { type: 'string', description: 'Image size filter.', enum: ['small', 'medium', 'large', 'xlarge'] },
-          orientation: { type: 'string', description: 'Aspect filter (client-side via W×H).', enum: ['landscape', 'portrait', 'square'] },
-          color: { type: 'string', description: 'Dominant color filter (e.g. blue, red, green).' },
+          size: { type: 'string', description: 'Filter by pixel dimensions, client-side via W×H (longest side: small <640, medium <1280, large <2000, xlarge ≥2000; images without dimensions are kept).', enum: ['small', 'medium', 'large', 'xlarge'] },
+          orientation: { type: 'string', description: 'Aspect filter, client-side via W×H (images without dimensions are kept).', enum: ['landscape', 'portrait', 'square'] },
           site: { type: 'string', description: 'Restrict to domain (e.g. dribbble.com, behance.net, unsplash.com).' },
           layout: { type: 'string', description: 'list (default) or gallery (renderable ![thumb] grid).', enum: ['list', 'gallery'], default: 'list' },
           ...this.linkResolution(),
@@ -187,7 +185,7 @@ export class SearchTools {
   private static newsSearch(): ToolDefinition {
     return {
       name: 'search_news',
-      description: 'Google News search via Serper API. Returns headlines, sources, and publication dates.',
+      description: 'Google News search via Serper API. Returns headlines, sources, and publication dates. Defaults to past day — pass freshness="any" for historical news, or use after:/before: operators in the query for date ranges.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -223,7 +221,7 @@ export class SearchTools {
   private static placesSearch(): ToolDefinition {
     return {
       name: 'search_places',
-      description: 'Google Places / Maps search via Serper API. Returns local businesses with address, phone, full 7-day hours, ratings, GPS + Directions links. Always rich — never compacted.',
+      description: 'Google Places / Maps search via Serper API. Returns local businesses with address, phone, full 7-day hours, ratings, GPS + Directions links. Rich by default; verbosity=compact keeps only title/rating/address.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -231,7 +229,6 @@ export class SearchTools {
           ...this.numResults(20, 5),
           ...this.localeParams(),
           ...this.verbosityParam(),
-          open_now_only: { type: 'boolean', description: 'Filter to currently-open places (client-side via hours text). Default: false.', default: false },
           min_rating: { type: 'number', description: 'Minimum rating filter (e.g. 4.5).', minimum: 0, maximum: 5 },
           sort_by: { type: 'string', description: 'Sort results.', enum: ['rating', 'reviews'] },
         },
@@ -296,7 +293,8 @@ export class SearchTools {
       description:
         'Fetch and extract the full contents of a single URL via Serper Scrape API. ' +
         'Returns the page content as markdown (or plain text). ' +
-        'Use after a search to read a promising page in full. Costs ~2 credits per page.',
+        'Costs 2 credits per page (every scrape; include_images does not change the price — chains multiply). ' +
+        'For synthesized answers prefer search_rag_context or deep_research over scraping many pages.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -425,7 +423,8 @@ export class SearchTools {
       name: 'resolve_links',
       description:
         'Turn google.com/goto redirect links from a recent search into real URLs via Serper /resolve ' +
-        '(free, 0 credits). Pass the search_id a search result asked for, or a list of goto links. ' +
+        '(free, 0 credits). Requires exactly one of: search_id, or links. ' +
+        'Pass the search_id a search result asked for, or a list of goto links. ' +
         'Right after a search one call takes ~20–30 s. Links not ready yet stay goto links; Serper then suggests ' +
         'a wait (often 90 s), which is only honoured if it fits in max_wait_seconds — otherwise call again later.',
       inputSchema: {
@@ -441,9 +440,12 @@ export class SearchTools {
   }
 
   static validateArgs(toolName: string, args: unknown): void {
+    if (toolName === 'search_maps' || toolName === 'search_reviews' || toolName === 'search_lens') return;
     const tool = this.getAllTools().find((t) => t.name === toolName);
     if (!tool) throw new ValidationError(`Unknown tool: ${toolName}`);
-    if (typeof args !== 'object' || args === null) throw new ValidationError('Arguments must be an object');
+    if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+      throw new ValidationError('Arguments must be an object');
+    }
 
     for (const key of tool.inputSchema.required) {
       if (!(key in (args as object))) throw new ValidationError(`Missing required parameter: ${key}`);
@@ -506,10 +508,53 @@ export class SearchTools {
       if (!Number.isFinite(n) || n < 0 || n > 5) throw new ValidationError('min_rating must be 0-5');
     }
 
-    if (a['type'] !== undefined && toolName === 'search') {
+    if (a['type'] !== undefined && toolName === 'search' && typeof a['type'] === 'string') {
       const t = (a['type'] as string).toLowerCase();
       if (!['web', 'images', 'videos', 'news', 'shopping', 'places', 'scholar', 'patents', 'autocomplete'].includes(t)) {
         throw new ValidationError('type must be web|images|videos|news|shopping|places|scholar|patents|autocomplete');
+      }
+    }
+
+    for (const [key, rawSchema] of Object.entries(tool.inputSchema.properties)) {
+      if (!(key in a) || a[key] === undefined) continue;
+      const schema = rawSchema as {
+        type?: string;
+        enum?: unknown[];
+        minimum?: number;
+        maximum?: number;
+        minItems?: number;
+        maxItems?: number;
+      };
+      const value = a[key];
+
+      if (schema.enum && !schema.enum.includes(value)) {
+        throw new ValidationError(`${key} must be one of: ${schema.enum.join('|')}`);
+      }
+      if (schema.type === 'string' && typeof value !== 'string') {
+        throw new ValidationError(`${key} must be a string`);
+      }
+      if (schema.type === 'number') {
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+          throw new ValidationError(`${key} must be a number`);
+        }
+        if (schema.minimum !== undefined && value < schema.minimum) {
+          throw new ValidationError(`${key} must be >= ${schema.minimum}`);
+        }
+        if (schema.maximum !== undefined && value > schema.maximum) {
+          throw new ValidationError(`${key} must be <= ${schema.maximum}`);
+        }
+      }
+      if (schema.type === 'boolean' && typeof value !== 'boolean') {
+        throw new ValidationError(`${key} must be a boolean`);
+      }
+      if (schema.type === 'array') {
+        if (!Array.isArray(value)) throw new ValidationError(`${key} must be an array`);
+        if (schema.minItems !== undefined && value.length < schema.minItems) {
+          throw new ValidationError(`${key} must contain at least ${schema.minItems} item${schema.minItems === 1 ? '' : 's'}`);
+        }
+        if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+          throw new ValidationError(`${key} must contain at most ${schema.maxItems} items`);
+        }
       }
     }
   }

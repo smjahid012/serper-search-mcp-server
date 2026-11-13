@@ -39,8 +39,29 @@ describe('SerperAPI', () => {
     assert.equal(body.hl, 'de');
     assert.equal(body.num, 20);            // clamped from 50
     assert.equal(body.gl, 'gb');
-    assert.equal(body.tbs, 'qdr:pw');
+    assert.equal(body.tbs, 'qdr:w');       // pd/pw/pm/py → Google quick-date d/w/m/y (qdr:pw is invalid and silently ignored)
     assert.equal(body.safe, 'active');
+  });
+
+  it('maps every freshness enum value to valid Google tbs quick-date syntax', async (t) => {
+    const fetchMock = t.mock.method(globalThis, 'fetch', async () => okJson({ organic: [] }));
+    const api = makeApi();
+
+    for (const [input, expected] of [['pd', 'qdr:d'], ['pw', 'qdr:w'], ['pm', 'qdr:m'], ['py', 'qdr:y']]) {
+      await api.search('x', 'web', { freshness: input });
+      const body = JSON.parse(fetchMock.mock.calls[fetchMock.mock.calls.length - 1].arguments[1].body);
+      assert.equal(body.tbs, expected, `freshness=${input}`);
+    }
+  });
+
+  it('freshness=any sends no tbs filter (historical opt-out, e.g. old news)', async (t) => {
+    const fetchMock = t.mock.method(globalThis, 'fetch', async () => okJson({ organic: [] }));
+    const api = makeApi();
+
+    await api.search('archive news', 'news', { freshness: 'any' });
+
+    const body = JSON.parse(fetchMock.mock.calls[0].arguments[1].body);
+    assert.equal('tbs' in body, false);
   });
 
   it('routes scholar to its dedicated endpoint', async (t) => {

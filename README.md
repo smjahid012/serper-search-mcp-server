@@ -1,13 +1,15 @@
 <div align="center">
 
-# 🔍 Serper Search MCP Server v4.0
+# 🔍 Serper Search MCP Server v4.1
 
-**The First Universal Search Gateway for AI Agents — Google (Serper), Tavily, Brave, Exa, and Firecrawl with auto-failover, 14 tools, and token-smart verbosity.**
+**The First Universal Search Gateway for AI Agents — Google (Serper), Tavily, Brave, Exa, and Firecrawl with auto-failover, 15 tools, and token-smart verbosity.**
 
 [![npm version](https://img.shields.io/npm/v/serper-search-mcp?color=blue&logo=npm)](https://www.npmjs.com/package/serper-search-mcp)
 [![npm downloads](https://img.shields.io/npm/dt/serper-search-mcp?color=brightgreen&label=npm%20downloads)](https://www.npmjs.com/package/serper-search-mcp)
 [![Docker Pulls](https://img.shields.io/docker/pulls/smjahid/server-serper-search?logo=docker)](https://hub.docker.com/r/smjahid/server-serper-search)
-[![GitHub stars](https://img.shields.io/github/stars/smjahid012/serper-search-mcp-server?style=social)](https://github.com/smjahid012/serper-search-mcp-server)
+[![Tools](https://img.shields.io/badge/Tools:%2015-blue)](#tool-reference)
+[![Node](https://img.shields.io/node/v/serper-search-mcp)](https://www.npmjs.com/package/serper-search-mcp)
+[![AI agents: Ready(Claude,Codex..)](https://img.shields.io/badge/AI%20agents:%20Ready(Claude,Codex..)-7B61FF?logo=bot&logoColor=white)](https://modelcontextprotocol.io)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-purple)](https://modelcontextprotocol.io)
 
@@ -17,13 +19,13 @@
 
 ## What this does
 
-This MCP server wraps the [Serper API](https://serper.dev) (Google Search results) and exposes **14 tools** that any MCP-compatible AI client (Claude, Cursor, Windsurf, KiloCode, n8n, etc.) can call in real time — including web, image, video, news, shopping, places, scholar, patents, autocomplete, full-page scraping, and batch search.
+This MCP server wraps the [Serper API](https://serper.dev) (Google Search results) and exposes **15 tools** that any MCP-compatible AI client (Claude, Cursor, Windsurf, KiloCode, n8n, etc.) can call in real time — including web, image, video, news, shopping, places, scholar, patents, autocomplete, full-page scraping, and batch search.
 
 | Tool | What you get |
 |---|---|
 | `search` ⭐ | Unified search `{type, provider, verbosity}` — 1 schema (~700 tokens vs ~7k for all) |
 | `search_web` | Organic results + **Knowledge Graph** + **Answer Box** + "People Also Ask" + Related Searches |
-| `search_images` | Image URLs, thumbnails, dimensions, source pages + `gallery` layout + `size/orientation/color/site` |
+| `search_images` | Image URLs, thumbnails, dimensions, source pages + `gallery` layout + `size/orientation/site` (size/orientation filter client-side via W×H) |
 | `search_videos` | Titles, channels, durations, links |
 | `search_news` | Headlines, sources, dates — freshness-filtered |
 | `search_shopping` | Products, prices, ratings, delivery info (always rich) |
@@ -46,7 +48,7 @@ This MCP server wraps the [Serper API](https://serper.dev) (Google Search result
 | `standard` | normal chat | KG + Answer Box + 10 organic | ~4k |
 | `full` | researcher | everything + citations | ~5k |
 
-> Credit rule: `compact` fetches `num=5` (never fetch-10-show-3). 1 search = 1 credit, cache hit = 0, scrape ≈ 2. `deep_research`: basic 3cr / standard 5cr / deep 8cr.
+> Credit rule: `compact` fetches `num=5` (never fetch-10-show-3). 1 search = 1 credit (1–10 results; >10 = 2), cache hit = 0, scrape = 2 **per page** (verified live — same with or without `include_images`; scrape chains multiply). `deep_research`: basic 3cr / standard 5cr / deep 8cr.
 
 ### Providers (universal gateway — auto-failover)
 
@@ -195,7 +197,7 @@ set SERPER_API_KEY=your_key
 node index.js
 ```
 
-> **💡 AI-powered research is free.** `deep_research` uses Gemini's free tier by default. Set `GEMINI_API_KEY` above to unlock it.
+> **AI-powered research runs on your own LLM key.** `deep_research` uses Gemini's free tier when `GEMINI_API_KEY` is set (OpenRouter takes priority if both are set — see the env table above).
 
 ---
 
@@ -224,10 +226,9 @@ Google web search with the full SERP breakdown.
   "num_results": 10,        // 1–20, default 10
   "country":     "US",      // ISO 3166-1 alpha-2
   "search_lang": "en",      // language code
-  "freshness":   "pw",      // "pd" day · "pw" week · "pm" month · "py" year
+  "freshness":   "pw",      // "pd" day · "pw" week · "pm" month · "py" year · "any" no filter
   "safesearch":  "moderate",// "off" · "moderate" · "strict"
   "autocorrect": true,
-  "summary":     false,     // Serper AI summary
   "page":        1,         // pagination
   "link_resolution": "auto" // "auto" · "all" · "none" — see Google redirect links below
 }
@@ -239,6 +240,9 @@ Google web search with the full SERP breakdown.
 - 🌐 **Organic results** — title, URL, snippet, sitelinks, date
 - 💬 **People Also Ask** — up to 4 follow-up questions with answers
 - 🔗 **Related Searches** — up to 6 suggestions
+- ⏱️ **Time filter** — footer echoes the applied `freshness` (or `none (all time)`) so agents know why results look thin
+
+> **No AI summary on this tool.** For a synthesized answer in ONE call use `deep_research` (full report, 3–8 credits + LLM) or `search_rag_context` (chunked evidence, 1 credit, no LLM). For **latest/current** results pass `freshness` (`py`, `pw`, …) — the footer confirms it was applied. Avoid `search → scrape → scrape` chains: every scrape costs 2 credits.
 
 ---
 
@@ -277,7 +281,7 @@ Returns: title, channel, duration, publish date, video URL.
 {
   "query":       "OpenAI GPT-5 release",
   "num_results": 10,
-  "freshness":   "pd",   // default is past day for news
+  "freshness":   "pd",   // default is past day for news; pass "any" for historical news (or use after:/before: operators in the query)
   "country":     "US"
 }
 ```
@@ -327,6 +331,7 @@ Google Scholar search for academic literature.
 {
   "query":       "attention is all you need",
   "num_results": 10,
+  "freshness":   "py",   // optional year filter — useful for recent literature
   "country":     "US"
 }
 ```
@@ -350,7 +355,7 @@ Fetch the full contents of a single URL (Serper Scrape API — `scrape.serper.de
 }
 ```
 
-Returns the page as markdown (falls back to plain text), truncated for context safety. Costs ~2 credits per page — typical flow is `search_web` → `scrape` the best result.
+Returns the page as markdown (falls back to plain text), truncated for context safety. **Costs 2 credits per page** (verified live — `include_images` does not change the price). Before scraping: prefer `search_rag_context` (1 credit, no LLM) or `deep_research` for synthesized answers; if you do scrape, chain only 1–3 pages — each page is 2 credits.
 
 ---
 
@@ -413,8 +418,10 @@ Links that are not ready yet stay goto links and Serper suggests a wait (often 9
 |---|---|---|---|
 | `SERPER_MCP_TRANSPORT` | ❌ | `stdio` | MCP transport mode: `stdio` (local AI clients) or `http` (stateless Streamable HTTP) |
 | `SERPER_MCP_PORT` | ❌ | `8080` | Port for HTTP transport mode (1–65535) |
-| `SERPER_MCP_HOST` | ❌ | `0.0.0.0` | Host interface to bind for HTTP mode |
-| `SERPER_MCP_AUTH_TOKEN` | ❌ | — | If set, HTTP `/mcp` requires `Authorization: Bearer <token>` |
+| `SERPER_MCP_HOST` | ❌ | `127.0.0.1` | Host interface to bind for HTTP mode (non-loopback requires `SERPER_MCP_AUTH_TOKEN`) |
+| `SERPER_MCP_AUTH_TOKEN` | ❌ | — | Bearer token for HTTP `/mcp` (`Authorization: Bearer <token>`); required off-loopback |
+| `SERPER_MCP_INSECURE_NO_AUTH` | ❌ | `false` | `true` allows binding a non-loopback host without a token (use only behind an authenticating reverse proxy) |
+| `SERPER_MCP_ALLOWED_HOSTS` | ❌ | — | Comma-separated extra `Host` values accepted on `/mcp` when bound to loopback (DNS-rebinding protection allows `127.0.0.1`/`localhost`/`::1` by default; add your reverse-proxy domain here) |
 | `SERPER_MCP_LOG_LEVEL` | ❌ | `info` | Logging verbosity: `error` · `warn` · `info` · `debug` · `silent` |
 
 ### Cache & Resilience Tuning
@@ -426,6 +433,8 @@ Links that are not ready yet stay goto links and Serper suggests a wait (often 9
 | `SERPER_TIMEOUT_MS` | ❌ | `30000` | Per-request timeout for Serper calls in ms |
 | `SERPER_RETRIES` | ❌ | `2` | Retries on 429 / 5xx / network errors (honors `Retry-After`) |
 | `SERPER_RETRY_BASE_MS` | ❌ | `500` | Base backoff delay in ms (exponential backoff + jitter) |
+| `SERPER_CACHE_PERSIST` | ❌ | `false` | `true` persists the search/scrape cache to disk (0600 files, 0700 dir, scoped per API key) |
+| `SERPER_CACHE_DIR` | ❌ | `~/.serper-cache` | Directory for the persisted cache files |
 | `SERPER_LINK_RESOLUTION` | ❌ | `auto` | Default `link_resolution` mode: `auto` · `all` · `none` |
 | `SERPER_RESOLVE_MAX_WAIT` | ❌ | `60` | Seconds `/resolve` may keep retrying when Serper says to wait |
 
@@ -514,7 +523,7 @@ Runs multi-step AI research using your own LLM key. No LLM data leaves your envi
 |---|---|---|---|
 | `basic` | 3 | 3 | Quick overviews |
 | `standard` | 5 | 5 | Most use cases |
-| `deep` | 8 | 7 | Exhaustive research |
+| `deep` | 8 | 5 | Exhaustive research |
 
 **Output:** Structured markdown report with inline citations + Sources section.
 
@@ -537,6 +546,7 @@ Turns Google search results into embedding-ready chunks. No LLM needed — pure 
 {
   "query":           "transformer architecture explained",
   "num_results":     10,
+  "freshness":       "py",     // optional: pd/pw/pm/py/any — omitted = all time
   "max_chunk_words": 200,
   "include_paa":     true,
   "output_format":   "json"   // "json" or "text"
@@ -590,7 +600,8 @@ serper-search-mcp-server/
 │   ├── index.ts                ← TypeScript CLI entry
 │   ├── api/
 │   │   ├── SerperAPI.ts        ← HTTP client (per-type endpoints, retry, timeout, TTL cache, scrape)
-│   │   └── LLMClient.ts        ← OpenRouter + Gemini client
+│   │   ├── LLMClient.ts        ← OpenRouter + Gemini client
+│   │   └── providers/          ← Universal gateway: Router (failover + RRF fusion) · Serper · Tavily · Brave · Exa · Firecrawl
 │   ├── server/
 │   │   └── SerperMCPServer.ts  ← MCP server, stdio + HTTP transport, bearer auth
 │   ├── tools/
@@ -603,6 +614,7 @@ serper-search-mcp-server/
 │   │   └── index.ts            ← Full TypeScript types
 │   └── utils/
 │       ├── ResultFormatter.ts  ← Markdown formatting
+│       ├── LinkResolution.ts   ← google.com/goto handling (link_resolution modes + /resolve)
 │       ├── HttpRetry.ts        ← Timeout + retry/backoff
 │       ├── TtlCache.ts         ← TTL + LRU cache
 │       ├── Logger.ts           ← Leveled stderr logger (+ request-id)
@@ -611,8 +623,8 @@ serper-search-mcp-server/
 │       └── EnvCheck.ts         ← Boot-time env validation
 ├── scripts/
 │   └── bundle.mjs              ← Builds index.js from src/ (`--check` mode for CI)
-├── tests/                      ← node:test suite (58 tests)
-└── .github/workflows/ci.yml    ← Node 18/20/22: build + bundle check + tests
+├── tests/                      ← node:test suite (102 tests)
+└── .github/workflows/ci.yml    ← Node 22/24: build + bundle check + tests
 ```
 
 **Dual-file design:** `index.js` runs without any build step (ideal for `npx` and Docker) and is generated from `src/` — the TS tree is the only source of truth. `npm run check:bundle` fails CI if they drift.
@@ -647,6 +659,7 @@ serper-search-mcp-server/
 | `search_many` | ❌ | ❌ | ❌ | ✅ batch + cross-query dedupe |
 | `deep_research` | ❌ | ❌ | ✅ sub-queries → parallel search → LLM report | ✅ |
 | `search_rag_context` | ❌ | ❌ | ✅ chunked text + metadata, JSON/text output | ✅ |
+| `resolve_links` + `link_resolution` modes | ❌ | ❌ | ❌ | ❌ → ✅ in **v4.1.0** (14 → 15 tools) |
 | **API endpoints** | all hitting `/search` with `tbm` param | all hitting `/search` with `tbm` param | ✅ correct per-type endpoints | ✅ + scholar + scrape host |
 | **Answer Box / KG / PAA** | ❌ | ❌ | ✅ full SERP extraction | ✅ |
 | **Pagination** | ❌ | ❌ | ✅ `page` param | ✅ |
@@ -667,9 +680,26 @@ serper-search-mcp-server/
 | **Client configs** | Claude Desktop only | Claude Desktop + a few | Claude Desktop + Cursor + Windsurf + KiloCode + n8n | ✅ |
 | **Telemetry** | ❌ none | ❌ none | ❌ none (intentional — privacy win) | ❌ none |
 
+> **v4.1.0** (see Changelog): security hardening + correctness sweep — tool count 14 → **15** (added `resolve_links`), no new search types.
+
 ---
 
 ## Changelog
+
+### v4.1.0 — Security hardening + correctness sweep (36 fixes)
+
+- 🔧 **`freshness` was silently broken** — the server sent invalid Google `tbs` values (`qdr:pd/pw/pm/py` instead of `qdr:d/w/m/y`), so Google ignored the filter and returned all-time results (the "16 years ago" problem from the incident log). One mapping fix healed 7 tools: `search`, `search_web`, `search_videos`, `search_news`, `search_scholar`, `search_many`, `search_rag_context`. Verified live: `freshness: py` → Dec 2025–Jun 2026 results at 1 credit.
+- ➕ **`freshness: "any"`** — explicit no-filter opt-out; `search_news` (defaults to past day) can now reach historical news (`before:2015-01-01` verified → 2004–2013 articles). `after:`/`before:` operators documented in the tool description.
+- ⏱️ **Footer `Time filter` echo** — every web/news response states the applied filter (`none (all time)` / `past day` / `past year` / `none (opt-out)`) so agents correct in one retry instead of looping.
+- 🔧 **People Also Ask guards** — question-only PAA entries no longer render `undefined` / `[Read more](undefined)`; `search_rag_context` no longer crashes on them (`cleanText(undefined)` TypeError).
+- 🧹 **Dead `summary` param removed from `search_web`** — Serper never implemented it and it was never rendered; schema/server/type cleaned (stale clients still passing `summary` are silently accepted — non-breaking). Tool description now steers to `search_rag_context` (fast) or `deep_research` (thorough) instead of search→scrape chains.
+- 💰 **Credit transparency** — `scrape` pricing verified live: 2 credits/page, identical with or without `include_images` (incident's "6 credits" = 3 scrapes × 2). README credit rules corrected; the misleading *"typical flow: search_web → scrape"* guidance replaced with rag/deep-first advice + chain warnings.
+- 🧪 **Tests** — **102/102** : regression tests for all four freshness mappings + the `any` opt-out; the old assertion that enshrined the bug (`tbs === 'qdr:pw'`) corrected to Google's real syntax.
+- 🔒 **HTTP is safe by default** — binds `127.0.0.1`, refuses a non-loopback bind without `SERPER_MCP_AUTH_TOKEN` (`SERPER_MCP_INSECURE_NO_AUTH=true` opts out), `docker-compose.yml` requires the token, chunked bodies are rejected (`411`), error messages are sanitized before leaving the process, the Gemini key moved to the `x-goog-api-key` header, bearer comparison is case-insensitive and constant-time (digest compare).
+- 🧠 **Wrong-results fixes** — failover now judges emptiness per search type (videos/shopping/patents/autocomplete are no longer discarded), `provider=all` fuses the right result field, non-Serper providers are rejected for non-web searches instead of returning empty output.
+- 🧪 **Tests are hermetic** — cache persistence is opt-in (`SERPER_CACHE_PERSIST=true`), files are `0600` in a `0700` dir, scoped per API key; the suite passes on immediate re-runs (82/82 ×2).
+- ✅ **Validation** — schema-driven `validateArgs` (types, enums, ranges), `layout` gallery wired, `size`/`orientation` filter client-side, dead `color`/`open_now_only` params removed.
+- ⚙️ **Reliability** — body reads are covered by the request timeout, `/resolve` wall-time is budgeted, per-request log IDs via `AsyncLocalStorage`, cache writes are debounced + atomic, deep-research counts only sources actually sent, empty LLM reports fail loudly, stdio shutdown can't hang.
 
 ### v4.0.0 — Universal Search Gateway (Multi-Provider, 14 Tools, CLI, Resilience, Tests)
 - ➕ **Universal Multi-Provider Gateway** — failover chain: Serper → Tavily → Brave (+ Exa/Firecrawl) with `provider=all` reciprocal-rank fusion
@@ -679,7 +709,7 @@ serper-search-mcp-server/
 - ➕ **`scrape` tool** — full page content as markdown via `scrape.serper.dev` (truncation-safe)
 - ➕ **`search_many` tool** — 1–10 parallel web searches, cross-query URL dedupe, per-query failure isolation
 - ➕ **Retry + timeout** — 429/5xx/network retries with exponential backoff + jitter (Retry-After honored)
-- ➕ **Response cache** — in-memory TTL + LRU (`SERPER_CACHE_TTL_MS=0` disables)
+- ➕ **Response cache** — in-memory TTL + LRU (`SERPER_CACHE_TTL_MS=0` disables); opt-in disk persistence (`SERPER_CACHE_PERSIST=true`, dir `SERPER_CACHE_DIR`, written 0600 and scoped per API key)
 - ➕ **Optional HTTP bearer auth** — `SERPER_MCP_AUTH_TOKEN` guards `/mcp`; `/health` stays open
 - ➕ **Real log levels** — `SERPER_MCP_LOG_LEVEL` now controls error/warn/info/debug/silent
 - ➕ **Test suite + CI** — 58 `node:test` tests (no extra deps, incl. real-HTTP e2e) + GitHub Actions matrix (Node 18/20/22)
@@ -718,7 +748,7 @@ serper-search-mcp-server/
 
 ## Contributing
 
-PRs and issues are welcome. Please open an issue before large changes.
+PRs and issues are welcome. Please open an issue before large changes — and if something looks wrong (stale results, unexpected credits, a parameter that seems ignored), start an issue or Discussion with the exact tool call, the response footer line (`Provider · Cache · Time filter · credits`), and your server version (`vX.Y.Z` startup banner or `npm view serper-search-mcp version`); security vulnerabilities go to GitHub Security Advisories, not public issues.
 
 ```bash
 git clone https://github.com/smjahid012/serper-search-mcp-server.git

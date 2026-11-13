@@ -6,6 +6,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -86,5 +87,44 @@ describe('HTTP transport e2e', () => {
       body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
     });
     assert.equal(authed.status, 200);
+  });
+
+  it('rejects foreign Host headers on /mcp (DNS rebinding protection)', async (t) => {
+    const port = basePort + 2;
+    const child = spawnServer(port);
+    t.after(() => child.kill());
+    await waitForHealth(port);
+
+    const post = (host) =>
+      new Promise((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: '127.0.0.1',
+            port,
+            path: '/mcp',
+            method: 'POST',
+            headers: {
+              Host: host,
+              'Content-Type': 'application/json',
+              Accept: 'application/json, text/event-stream',
+            },
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (c) => (data += c));
+            res.on('end', () => resolve({ status: res.statusCode, data }));
+          }
+        );
+        req.on('error', reject);
+        req.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }));
+      });
+
+    const evil = await post('evil.example.com');
+    assert.equal(evil.status, 403);
+    assert.match(evil.data, /rebinding/);
+
+    const good = await post(`127.0.0.1:${port}`);
+    assert.equal(good.status, 200);
+    assert.match(good.data, /search_web/);
   });
 });

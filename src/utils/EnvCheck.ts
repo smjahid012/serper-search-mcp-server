@@ -10,10 +10,12 @@
 const KNOWN_ENV = new Set([
   // server
   'SERPER_API_KEY', 'SERPER_MCP_TRANSPORT', 'SERPER_MCP_PORT', 'SERPER_MCP_HOST',
-  'SERPER_MCP_AUTH_TOKEN', 'SERPER_MCP_LOG_LEVEL',
+  'SERPER_MCP_AUTH_TOKEN', 'SERPER_MCP_LOG_LEVEL', 'SERPER_MCP_INSECURE_NO_AUTH',
+  'SERPER_MCP_ALLOWED_HOSTS',
   // tuning (read lazily via numberFromEnv)
   'SERPER_CACHE_TTL_MS', 'SERPER_CACHE_MAX', 'SERPER_TIMEOUT_MS', 'SERPER_RETRIES',
   'SERPER_RETRY_BASE_MS', 'SERPER_LLM_TIMEOUT_MS', 'SERPER_LLM_RETRIES',
+  'SERPER_CACHE_PERSIST', 'SERPER_CACHE_DIR',
   // Google redirect-link resolution
   'SERPER_LINK_RESOLUTION', 'SERPER_RESOLVE_MAX_WAIT',
   // provider routing
@@ -60,6 +62,11 @@ export function validateEnv(env: NodeJS.ProcessEnv = process.env): string[] {
   const linkMode = env.SERPER_LINK_RESOLUTION;
   if (linkMode && !['auto', 'all', 'none'].includes(linkMode)) {
     warnings.push(`SERPER_LINK_RESOLUTION must be auto|all|none (got "${linkMode}") — falling back to auto`);
+  }
+
+  const persist = env.SERPER_CACHE_PERSIST;
+  if (persist !== undefined && persist !== '' && !['true', '1', 'yes', 'false', '0', 'no'].includes(persist.toLowerCase())) {
+    warnings.push(`SERPER_CACHE_PERSIST must be true|false (got "${persist}") — disk persistence stays off`);
   }
 
   const order = env.SEARCH_PROVIDER_ORDER;

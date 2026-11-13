@@ -8,7 +8,7 @@
  *  3. Synthesize all results into a cited research report (LLM)
  */
 
-import { SerperAPI } from '../api/SerperAPI.js';
+import { ProviderRouter } from '../api/providers/Router.js';
 import { callLLM, getLLMProvider } from '../api/LLMClient.js';
 import { mapWithConcurrency, RESEARCH_CONCURRENCY } from '../utils/Concurrency.js';
 import { OrganicResult } from '../types/index.js';
@@ -57,20 +57,37 @@ Return ONLY a JSON array of strings, no explanation, no markdown, no code fences
 
   const { content } = await callLLM(prompt);
 
+  const variants = [
+    query,
+    `${query} overview`,
+    `${query} latest research`,
+    `${query} key facts`,
+    `${query} examples`,
+    `${query} comparison`,
+    `${query} statistics`,
+    `${query} recent developments`,
+  ];
+  const pad = (list: string[]): string[] => {
+    const out = list.slice(0, count);
+    for (const v of variants) {
+      if (out.length >= count) break;
+      if (!out.includes(v)) out.push(v);
+    }
+    return out;
+  };
+
   try {
     const clean = content.replace(/```[a-z]*\n?/g, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(clean);
     if (Array.isArray(parsed) && parsed.every((q) => typeof q === 'string')) {
-      return parsed.slice(0, count);
+      return (parsed as string[]).slice(0, count);
     }
   } catch {
-    // fallback: extract quoted strings
     const matches = content.match(/"([^"]+)"/g);
-    if (matches) return matches.slice(0, count).map((m) => m.replace(/"/g, ''));
+    if (matches) return pad(matches.map((m) => m.replace(/"/g, '')));
   }
 
-  // last resort: use the original query with simple variations
-  return [query, `${query} overview`, `${query} latest research`].slice(0, count);
+  return variants.slice(0, count);
 }
 
 // ── Step 2: run searches ──────────────────────────────────────────────────────
@@ -78,18 +95,18 @@ Return ONLY a JSON array of strings, no explanation, no markdown, no code fences
 async function runSearches(
   subQueries: string[],
   resultsPerQuery: number,
-  api: SerperAPI,
+  router: ProviderRouter,
   country: string
 ): Promise<SubQueryResult[]> {
   const searches = subQueries.map((sq) => async () => {
     try {
-      const data = await api.search(sq, 'web', { num_results: resultsPerQuery, country });
+      const data = await router.search(sq, 'web', { num_results: resultsPerQuery, country });
       let results = (data.organic ?? []).slice(0, resultsPerQuery);
       let resolveError: string | undefined;
       // Resolve Google redirect links before the URLs go into the prompt (free).
       if (countGotoLinks(results)) {
         try {
-          const r = await api.resolve({ links: results.map((x) => x.link) });
+          const r = await router.resolve({ links: results.map((x) => x.link) });
           const links = r.data['links'] as unknown[];
           results = results.map((x, i) => (typeof links[i] === 'string' ? { ...x, link: links[i] as string } : x));
         } catch (err) {
@@ -116,27 +133,41 @@ function buildContext(searchResults: SubQueryResult[]): {
   const sections: string[] = [];
   const gotoSources: Array<{ n: number; link: string }> = [];
   let sourceCount = 0;
+  let length = 0;
+  let truncated = false;
+  const budget = MAX_RESEARCH_CONTEXT_CHARS;
 
-  for (const { subQuery, results } of searchResults) {
+  outer: for (const { subQuery, results } of searchResults) {
     if (!results.length) continue;
-    sections.push(`### Sub-query: "${subQuery}"\n`);
+    const header = `### Sub-query: "${subQuery}"\n`;
+    if (length + header.length > budget) {
+      truncated = true;
+      break;
+    }
+    sections.push(header);
+    length += header.length + 1;
     for (const r of results) {
-      sourceCount++;
-      if (isGotoLink(r.link)) gotoSources.push({ n: sourceCount, link: r.link });
-      sections.push(`**[${sourceCount}] ${r.title}**`);
-      sections.push(`URL: ${r.link}`);
-      if (r.snippet) sections.push(`Snippet: ${r.snippet}`);
-      if (r.date) sections.push(`Date: ${r.date}`);
-      sections.push('');
+      const block: string[] = [];
+      const n = sourceCount + 1;
+      block.push(`**[${n}] ${r.title}**`);
+      block.push(`URL: ${r.link}`);
+      if (r.snippet) block.push(`Snippet: ${r.snippet}`);
+      if (r.date) block.push(`Date: ${r.date}`);
+      block.push('');
+      const text = block.join('\n') + '\n';
+      if (length + text.length > budget) {
+        truncated = true;
+        break outer;
+      }
+      sourceCount = n;
+      if (isGotoLink(r.link)) gotoSources.push({ n, link: r.link });
+      sections.push(text);
+      length += text.length + 1;
     }
   }
 
   let context = sections.join('\n');
-  let truncated = false;
-  if (context.length > MAX_RESEARCH_CONTEXT_CHARS) {
-    context = context.slice(0, MAX_RESEARCH_CONTEXT_CHARS) + '\n\n…[context truncated to 12k chars]';
-    truncated = true;
-  }
+  if (truncated) context += '\n\n…[context truncated to 12k chars]';
 
   return { context, sourceCount, truncated, gotoSources };
 }
@@ -169,6 +200,11 @@ ${context}
 Write the research report now:`;
 
   const { content, provider, model } = await callLLM(prompt);
+  if (!content.trim()) {
+    throw new Error(
+      `LLM (${provider}/${model}) returned an empty report — retry, or switch OPENROUTER_API_KEY / GEMINI_API_KEY`
+    );
+  }
   return { report: content, provider, model };
 }
 
@@ -178,7 +214,7 @@ export async function runDeepResearch(
   query: string,
   depth: ResearchDepth = 'standard',
   country = 'US',
-  api: SerperAPI
+  router: ProviderRouter
 ): Promise<ResearchResult> {
   const llmConfig = getLLMProvider();
   if (!llmConfig) {
@@ -195,7 +231,7 @@ export async function runDeepResearch(
   const subQueries = await generateSubQueries(query, subQueryCount);
 
   // Step 2
-  const searchResults = await runSearches(subQueries, resultsPerQuery, api, country);
+  const searchResults = await runSearches(subQueries, resultsPerQuery, router, country);
 
   // Step 3
   const { context, sourceCount, gotoSources } = buildContext(searchResults);

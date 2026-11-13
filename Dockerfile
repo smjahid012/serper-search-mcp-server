@@ -3,7 +3,7 @@
 # ─── Build stage ────────────────────────────────────────────────────────────
 # BUILDPLATFORM = host (amd64) → npm ci & tsc run natively, NOT under QEMU.
 # Output is pure JS so it works on any target platform.
-FROM --platform=$BUILDPLATFORM node:20-alpine AS builder
+FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -23,7 +23,7 @@ RUN npm run rebuild
 # ─── Production stage ────────────────────────────────────────────────────────
 # TARGETPLATFORM = arm64 or amd64 — Docker pulls the right node image natively.
 # No QEMU emulation here either — just copying files into the right base image.
-FROM node:20-alpine AS production
+FROM node:22-alpine AS production
 
 LABEL org.opencontainers.image.title="serper-search-mcp" \
       org.opencontainers.image.description="Serper Search MCP Server — Universal Search Gateway for AI Agents" \

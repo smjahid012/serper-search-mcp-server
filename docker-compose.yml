@@ -17,6 +17,7 @@ services:
       - SERPER_MCP_TRANSPORT=http
       - SERPER_MCP_PORT=8080
       - SERPER_MCP_HOST=0.0.0.0
+      - SERPER_MCP_AUTH_TOKEN=${SERPER_MCP_AUTH_TOKEN:?set SERPER_MCP_AUTH_TOKEN}
       - SERPER_MCP_LOG_LEVEL=info
     restart: unless-stopped
     healthcheck:
@@ -27,7 +28,7 @@ services:
       start_period: 10s
     labels:
       - "mcp.server.name=serper-search"
-      - "mcp.server.version=4.0.0"
+      - "mcp.server.version=4.1.0"
       - "mcp.server.author=smjahid012 (SMLabs AI)"
 
   # Development environment with hot reload
@@ -47,10 +48,11 @@ services:
       - SERPER_MCP_TRANSPORT=http
       - SERPER_MCP_PORT=8080
       - SERPER_MCP_HOST=0.0.0.0
+      - SERPER_MCP_AUTH_TOKEN=${SERPER_MCP_AUTH_TOKEN:?set SERPER_MCP_AUTH_TOKEN}
       - SERPER_MCP_LOG_LEVEL=debug
     profiles:
       - dev
     labels:
       - "mcp.server.name=serper-search-dev"
-      - "mcp.server.version=4.0.0-dev"
+      - "mcp.server.version=4.1.0-dev"
       - "mcp.server.author=smjahid012 (SMLabs AI)"

@@ -4,8 +4,11 @@
  *
  * Resilience: per-request timeout + retry/backoff on 429/5xx/network errors.
  * Caching: in-memory TTL + LRU for successful responses (SERPER_CACHE_TTL_MS=0 disables).
+ * Disk persistence is opt-in (SERPER_CACHE_PERSIST=true, dir SERPER_CACHE_DIR),
+ * written 0600/0700 and scoped per API key.
  */
 
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -69,8 +72,11 @@ function numberFromEnv(name: string, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+const PERSIST_TRUE = new Set(['true', '1', 'yes']);
+
 function getPersistPath(name: string): string | undefined {
-  if (process.env.SERPER_CACHE_PERSIST === 'false') return undefined;
+  const raw = (process.env.SERPER_CACHE_PERSIST ?? '').toLowerCase();
+  if (!PERSIST_TRUE.has(raw)) return undefined;
   const dir = process.env.SERPER_CACHE_DIR || path.join(os.homedir(), '.serper-cache');
   return path.join(dir, `${name}.json`);
 }
@@ -91,10 +97,15 @@ function buildSearchBody(query: string, options: Partial<SearchOptions>): Record
     autocorrect: options.autocorrect ?? true,
   };
 
-  if (options.freshness) body.tbs = `qdr:${options.freshness}`;
+  // Google tbs quick-date syntax is single-letter (qdr:d/w/m/y) — our public
+  // enum is pd/pw/pm/py, so map it. Sending qdr:pd etc. is invalid and Google
+  // silently ignores the filter (returns all-time results).
+  const TBS_QUICK_DATE: Record<string, string> = { pd: 'd', pw: 'w', pm: 'm', py: 'y' };
+  // 'any' = explicit opt-out (no tbs) — needed because search_news defaults to
+  // pd when freshness is omitted, making historical news otherwise unreachable.
+  if (options.freshness && options.freshness !== 'any') body.tbs = `qdr:${TBS_QUICK_DATE[options.freshness] ?? options.freshness}`;
   if (options.safesearch === 'strict') body.safe = 'active';
   if (options.safesearch === 'off') body.safe = 'off';
-  if (options.summary) body.summary = true;
   if (options.page && options.page > 1) body.page = options.page;
   if (options.link_resolution === 'none') body.resolveLinks = false;
 
@@ -108,9 +119,11 @@ export class SerperAPI {
   private baseDelayMs: number;
   private cache: TtlCache<SerperAPIResponse> | null;
   private scrapeCache: TtlCache<Record<string, unknown>> | null;
+  private keyScope: string;
 
   constructor(apiKey: string, options: SerperAPIOptions = {}) {
     this.apiKey = apiKey;
+    this.keyScope = createHash('sha256').update(String(apiKey)).digest('hex').slice(0, 12);
     this.timeoutMs  = options.timeoutMs  ?? numberFromEnv('SERPER_TIMEOUT_MS', 30_000);
     this.retries    = options.retries    ?? numberFromEnv('SERPER_RETRIES', 2);
     this.baseDelayMs = options.baseDelayMs ?? numberFromEnv('SERPER_RETRY_BASE_MS', 500);
@@ -133,9 +146,8 @@ export class SerperAPI {
     const url = ENDPOINT_MAP[searchType] ?? ENDPOINT_MAP.web;
     const body = buildSearchBody(query, options);
 
-    // Normalize query in cache key (lowercased) so casing differences don't burn duplicate credits
     const cacheQuery = (body.q as string).toLowerCase();
-    const cacheKey = `${searchType}:${JSON.stringify({ ...body, q: cacheQuery })}`;
+    const cacheKey = `${this.keyScope}:${searchType}:${JSON.stringify({ ...body, q: cacheQuery })}`;
     increment('searches');
 
     const cached = this.cache?.get(cacheKey);
@@ -164,7 +176,7 @@ export class SerperAPI {
       includeLinks:    options.includeLinks ?? false,
       includeVideos:   options.includeVideos ?? false,
     };
-    const cacheKey = `scrape:${normalizedUrl.toLowerCase()}:${JSON.stringify(body)}`;
+    const cacheKey = `${this.keyScope}:scrape:${JSON.stringify(body)}`;
 
     const cached = this.scrapeCache?.get(cacheKey);
     if (cached) {
@@ -191,8 +203,12 @@ export class SerperAPI {
     for (let attempts = 1; ; attempts++) {
       const body = Object.fromEntries(Object.entries(current).filter(([k]) => !LOCAL_FIELDS.includes(k)));
       const started = Date.now();
+      const remaining = Math.max(0, deadline - started);
+      const perAttempt = Math.max(1, Math.min(Math.max(this.timeoutMs, RESOLVE_TIMEOUT_MS), Math.max(remaining, this.timeoutMs)));
+      const retries = Math.min(this.retries, Math.max(0, Math.floor(remaining / perAttempt) - 1));
       const out: unknown = await this.post(RESOLVE_ENDPOINT, body, {
-        timeoutMs: Math.max(this.timeoutMs, RESOLVE_TIMEOUT_MS),
+        timeoutMs: perAttempt,
+        retries,
         errorPrefix: 'Serper /resolve error',
       });
       checkResolveShape(body, out);
@@ -210,7 +226,7 @@ export class SerperAPI {
   private async post<T>(
     url: string,
     body: Record<string, unknown>,
-    overrides: { timeoutMs?: number; errorPrefix?: string } = {}
+    overrides: { timeoutMs?: number; retries?: number; errorPrefix?: string } = {}
   ): Promise<T> {
     const response = await fetchWithRetry(
       url,
@@ -224,7 +240,7 @@ export class SerperAPI {
       },
       {
         timeoutMs: overrides.timeoutMs ?? this.timeoutMs,
-        retries: this.retries,
+        retries: overrides.retries ?? this.retries,
         baseDelayMs: this.baseDelayMs,
         errorPrefix: overrides.errorPrefix ?? 'Serper API error',
       }

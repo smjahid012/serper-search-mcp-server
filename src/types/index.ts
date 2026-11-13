@@ -11,9 +11,8 @@ export interface SearchOptions {
   country?: string;
   search_lang?: string;
   ui_lang?: string;
-  freshness?: 'pd' | 'pw' | 'pm' | 'py';
+  freshness?: 'pd' | 'pw' | 'pm' | 'py' | 'any';
   safesearch?: 'off' | 'moderate' | 'strict';
-  summary?: boolean;
   page?: number;
   autocorrect?: boolean;
   // v3.1 token knobs: verbosity controls display density (not credits),

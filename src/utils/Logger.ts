@@ -8,6 +8,8 @@
  * request handler so concurrent requests are traceable end-to-end.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug' | 'silent';
 
 const LEVEL_ORDER: Record<LogLevel, number> = {
@@ -24,7 +26,8 @@ function normalizeLevel(value: string | undefined): LogLevel {
 }
 
 let current: LogLevel = normalizeLevel(process.env.SERPER_MCP_LOG_LEVEL);
-let requestId = '';
+const requestStore = new AsyncLocalStorage<string>();
+let fallbackRequestId = '';
 
 export function setLogLevel(level: string | undefined): void {
   current = normalizeLevel(level);
@@ -36,16 +39,22 @@ export function getLogLevel(): LogLevel {
 
 /** Stamp subsequent log lines with a request id (empty string = unstamped). */
 export function setRequestId(id: string): void {
-  requestId = id;
+  fallbackRequestId = id;
+}
+
+/** Run `fn` with a request id that is isolated per async context (concurrent-safe). */
+export function withRequestId<T>(id: string, fn: () => T): T {
+  return requestStore.run(id, fn);
 }
 
 export function getRequestId(): string {
-  return requestId;
+  return requestStore.getStore() ?? fallbackRequestId;
 }
 
 function emit(level: Exclude<LogLevel, 'silent'>, args: unknown[]): void {
   if (LEVEL_ORDER[level] > LEVEL_ORDER[current]) return;
-  const prefix = requestId ? `[serper-mcp][${requestId}]` : '[serper-mcp]';
+  const id = getRequestId();
+  const prefix = id ? `[serper-mcp][${id}]` : '[serper-mcp]';
   console.error(prefix, ...args);
 }
 

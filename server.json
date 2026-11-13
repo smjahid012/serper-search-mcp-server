@@ -3,13 +3,13 @@
   "name": "io.github.smjahid012/serper-search-mcp",
   "title": "Serper Search MCP",
   "description": "Universal Google Search MCP: web, images, places, shopping, scholar, patents, deep research & RAG",
-  "version": "4.0.1",
+  "version": "4.1.0",
   "websiteUrl": "https://github.com/smjahid012/serper-search-mcp-server",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "serper-search-mcp",
-      "version": "4.0.1",
+      "version": "4.1.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"

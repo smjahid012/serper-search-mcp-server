@@ -5,7 +5,7 @@
  * ttlMs <= 0 disables storage entirely (get always misses).
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 interface CacheEntry<V> {
@@ -17,6 +17,7 @@ export class TtlCache<V> {
   private store = new Map<string, CacheEntry<V>>();
   private persistPath?: string;
   private saveTimeout?: NodeJS.Timeout;
+  private pendingFlush = false;
 
   constructor(
     private readonly ttlMs: number,
@@ -26,6 +27,9 @@ export class TtlCache<V> {
     this.persistPath = persistPath;
     if (this.persistPath) {
       this.loadFromDisk();
+      process.on('exit', () => {
+        if (this.pendingFlush) this.flushToDisk();
+      });
     }
   }
 
@@ -43,6 +47,11 @@ export class TtlCache<V> {
           }
         }
       }
+      while (this.store.size > this.maxEntries) {
+        const oldest = this.store.keys().next().value;
+        if (oldest === undefined) break;
+        this.store.delete(oldest);
+      }
     } catch {
       // Ignore disk read error and fallback to memory store
     }
@@ -50,6 +59,7 @@ export class TtlCache<V> {
 
   private scheduleSave(): void {
     if (!this.persistPath || this.ttlMs <= 0) return;
+    this.pendingFlush = true;
     if (this.saveTimeout) clearTimeout(this.saveTimeout);
     this.saveTimeout = setTimeout(() => {
       this.flushToDisk();
@@ -61,6 +71,7 @@ export class TtlCache<V> {
 
   public flushToDisk(): void {
     if (!this.persistPath) return;
+    this.pendingFlush = false;
     try {
       const now = Date.now();
       const validEntries: Array<[string, CacheEntry<V>]> = [];
@@ -71,9 +82,16 @@ export class TtlCache<V> {
       }
       const dir = dirname(this.persistPath);
       if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true });
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
       }
-      writeFileSync(this.persistPath, JSON.stringify(validEntries), 'utf-8');
+      try {
+        chmodSync(dir, 0o700);
+      } catch {
+        // best effort — e.g. read-only or non-POSIX filesystems
+      }
+      const tmp = `${this.persistPath}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify(validEntries), { encoding: 'utf-8', mode: 0o600 });
+      renameSync(tmp, this.persistPath);
     } catch {
       // Silently ignore disk write errors
     }
@@ -107,7 +125,7 @@ export class TtlCache<V> {
       this.store.delete(oldest);
     }
 
-    this.flushToDisk();
+    this.scheduleSave();
   }
 
   get size(): number {

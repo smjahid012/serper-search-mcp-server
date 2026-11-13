@@ -79,12 +79,12 @@ async function callOpenRouter(config: LLMConfig, prompt: string): Promise<string
 }
 
 async function callGemini(config: LLMConfig, prompt: string): Promise<string> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:generateContent?key=${config.apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:generateContent`;
   const res = await fetchWithRetry(
     url,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': config.apiKey },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { maxOutputTokens: 4096 },

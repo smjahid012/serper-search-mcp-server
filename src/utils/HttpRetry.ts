@@ -72,19 +72,46 @@ export async function fetchWithRetry(
           ? `${prefix}: request timed out after ${timeoutMs}ms`
           : `${prefix}: ${err instanceof Error ? err.message : String(err)}`
       );
-    } finally {
       clearTimeout(timer);
     }
 
     if (response) {
-      if (response.ok) return response;
+      if (response.ok) {
+        try {
+          const text = await response.text();
+          clearTimeout(timer);
+          if (response.status === 204 || response.status === 205 || response.status === 304) {
+            return new Response(null, {
+              status: response.status,
+              statusText: response.statusText,
+              headers: response.headers,
+            });
+          }
+          return new Response(text, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+          });
+        } catch (err) {
+          const aborted = err instanceof Error && err.name === 'AbortError';
+          failure = new Error(
+            aborted
+              ? `${prefix}: request timed out after ${timeoutMs}ms`
+              : `${prefix}: ${err instanceof Error ? err.message : String(err)}`
+          );
+          clearTimeout(timer);
+          response = null;
+        }
+      } else {
+        const errResponse = response;
+        const msg = await errResponse.text().catch(() => errResponse.statusText);
+        clearTimeout(timer);
+        failure = new Error(`${prefix} ${errResponse.status}: ${msg}`) as Error & { status?: number };
+        (failure as Error & { status?: number }).status = errResponse.status;
 
-      const msg = await response.text().catch(() => response.statusText);
-      failure = new Error(`${prefix} ${response.status}: ${msg}`) as Error & { status?: number };
-      (failure as Error & { status?: number }).status = response.status;
-
-      if (!isRetryableStatus(response.status)) throw failure;
-      retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
+        if (!isRetryableStatus(errResponse.status)) throw failure;
+        retryAfterMs = parseRetryAfter(errResponse.headers.get('retry-after'));
+      }
     }
 
     lastError = failure as Error;

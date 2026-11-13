@@ -39,6 +39,39 @@ export interface FormatOptions {
   maxChars?: number;
   snippetsOnly?: boolean;
   fields?: string[];
+  layout?: string;
+  size?: string;
+  orientation?: string;
+  /** Applied freshness (pd/pw/pm/py/any) — echoed in the footer so agents can see why results look thin. */
+  timeFilter?: string;
+}
+
+const SIZE_RANGES: Record<string, [number, number]> = {
+  small: [0, 640],
+  medium: [640, 1280],
+  large: [1280, 2000],
+  xlarge: [2000, Infinity],
+};
+
+function filterImages(results: ImageResult[], opts: FormatOptions): ImageResult[] {
+  let out = results;
+  if (opts.size && SIZE_RANGES[opts.size]) {
+    const [lo, hi] = SIZE_RANGES[opts.size] as [number, number];
+    out = out.filter((r) => {
+      if (!r.imageWidth || !r.imageHeight) return true;
+      const longest = Math.max(r.imageWidth, r.imageHeight);
+      return longest >= lo && longest < hi;
+    });
+  }
+  if (opts.orientation) {
+    out = out.filter((r) => {
+      if (!r.imageWidth || !r.imageHeight) return true;
+      if (opts.orientation === 'landscape') return r.imageWidth > r.imageHeight;
+      if (opts.orientation === 'portrait') return r.imageHeight > r.imageWidth;
+      return r.imageWidth === r.imageHeight;
+    });
+  }
+  return out;
 }
 
 export class ResultFormatter {
@@ -114,8 +147,9 @@ export class ResultFormatter {
       parts.push('\n### 💬 People Also Ask\n');
       for (const paa of data.peopleAlsoAsk.slice(0, 4)) {
         parts.push(`**Q: ${paa.question}**`);
-        parts.push(`${paa.snippet}`);
-        parts.push(`[Read more](${paa.link})\n`);
+        if (paa.snippet) parts.push(paa.snippet);
+        if (paa.link) parts.push(`[Read more](${paa.link})`);
+        parts.push('');
       }
     }
 
@@ -131,6 +165,12 @@ export class ResultFormatter {
     if (data.credits !== undefined) footer.push(`Serper credits used: ${data.credits}`);
     const provider = data.provider ?? 'serper';
     const cacheHit = data.cache_hit === true;
+    const TIME_LABELS: Record<string, string> = { pd: 'past day', pw: 'past week', pm: 'past month', py: 'past year', any: 'none (opt-out)' };
+    if (searchType === 'web' || searchType === 'news') {
+      footer.push(`Time filter: ${opts.timeFilter ? (TIME_LABELS[opts.timeFilter] ?? opts.timeFilter) : 'none (all time)'}`);
+    } else if (opts.timeFilter) {
+      footer.push(`Time filter: ${TIME_LABELS[opts.timeFilter] ?? opts.timeFilter}`);
+    }
     if (verbosity === 'compact') {
       footer.push('Tokens: ~800 (compact) · upgrade with verbosity=full');
     }
@@ -171,6 +211,7 @@ export class ResultFormatter {
   }
 
   static formatImages(results: ImageResult[], max: number, opts: FormatOptions & { layout?: string } = {}): string[] {
+    results = filterImages(results, opts);
     if (!results.length) return ['*No image results found.*'];
     // Gallery mode: renderable thumbnails for designers (Claude Desktop / ChatGPT render ![alt](url))
     if (opts.layout === 'gallery') {
@@ -257,7 +298,7 @@ export class ResultFormatter {
   static formatPlaces(
     results: PlaceResult[],
     max: number,
-    filters: { openNowOnly?: boolean; minRating?: number; sortBy?: 'rating' | 'reviews' } = {}
+    filters: { minRating?: number; sortBy?: 'rating' | 'reviews'; compact?: boolean } = {}
   ): string[] {
     if (!results.length) return ['*No place results found.*'];
     let list = [...results];
@@ -267,6 +308,16 @@ export class ResultFormatter {
     if (filters.sortBy === 'reviews') list.sort((a, b) => (b.ratingCount ?? 0) - (a.ratingCount ?? 0));
     const out: string[] = ['### 📍 Place Results\n'];
     for (const [i, r] of list.slice(0, max).entries()) {
+      if (filters.compact) {
+        out.push(`#### ${i + 1}. ${r.title}`);
+        if (r.rating) {
+          const stars = '⭐'.repeat(Math.round(r.rating));
+          out.push(`- **Rating:** ${stars} ${r.rating}${r.ratingCount ? ` (${r.ratingCount.toLocaleString()} reviews)` : ''}`);
+        }
+        if (r.address) out.push(`- **Address:** ${r.address}`);
+        out.push('');
+        continue;
+      }
       out.push(`#### ${i + 1}. ${r.title}${r.category ? ` *${r.category}*` : ''}`);
       if (r.address) out.push(`- **Address:** ${r.address}`);
       if (r.phoneNumber) out.push(`- **Phone:** ${r.phoneNumber}`);

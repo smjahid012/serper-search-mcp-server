@@ -8,7 +8,7 @@
  * whole batch — they are reported inline.
  */
 
-import { SerperAPI } from '../api/SerperAPI.js';
+import { ProviderRouter } from '../api/providers/Router.js';
 import { OrganicResult, SearchOptions } from '../types/index.js';
 import { mapWithConcurrency, RESEARCH_CONCURRENCY } from '../utils/Concurrency.js';
 
@@ -32,13 +32,13 @@ export async function runBatchSearch(
     freshness?: SearchOptions['freshness'];
     safesearch?: SearchOptions['safesearch'];
   },
-  api: SerperAPI
+  router: ProviderRouter
 ): Promise<string> {
   const numResults = Math.min(20, Math.max(1, Math.floor(Number(options.num_results)) || 5));
 
   const perQuery = await mapWithConcurrency(queries, MAX_CONCURRENCY, async (query) => {
     try {
-      const data = await api.search(query, 'web', {
+      const data = await router.search(query, 'web', {
         num_results: numResults,
         country:     options.country,
         search_lang: options.search_lang,

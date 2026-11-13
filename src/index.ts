@@ -17,13 +17,19 @@ function parseArgs(): { flags: Record<string, string>; positional: string[] } {
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i] as string;
     if (tok.startsWith('--')) {
-      const key = tok.slice(2);
+      const body = tok.slice(2);
+      const eq = body.indexOf('=');
+      if (eq >= 0) {
+        flags[body.slice(0, eq)] = body.slice(eq + 1);
+        continue;
+      }
       const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith('--')) {
-        flags[key] = next;
+      const takesValue = next !== undefined && (!next.startsWith('-') || /^-\d/.test(next));
+      if (takesValue) {
+        flags[body] = next;
         i++;
       } else {
-        flags[key] = 'true';
+        flags[body] = 'true';
       }
     } else {
       positional.push(tok);
@@ -70,7 +76,7 @@ async function runCliCommand(cmd: string, rest: string[], flags: Record<string, 
   if (cmd === 'search' || cmd === 'scrape' || cmd === 'research' || cmd === 'rag') {
     const query = rest.join(' ').trim();
     if (!query && cmd !== 'scrape') {
-      console.error(`Usage: serper-search-mcp ${cmd} "<query>" [--compact --limit 5 --provider auto --json]`);
+      console.error(`Usage: serper-search-mcp ${cmd} "<query>" [--compact --limit 5 --provider auto --freshness pd|pw|pm|py|any --type web|news|... --json]`);
       process.exit(1);
     }
     if (cmd === 'search') {
@@ -80,9 +86,16 @@ async function runCliCommand(cmd: string, rest: string[], flags: Record<string, 
         console.error(`Invalid search type: "${type}". Must be one of: ${validTypes.join(', ')}`);
         process.exit(1);
       }
-      const data = await router.search(query, type, { num_results: limit, provider });
+      const validFreshness = ['pd', 'pw', 'pm', 'py', 'any'];
+      if (flags['freshness'] && !validFreshness.includes(flags['freshness'])) {
+        console.error(`Invalid --freshness: "${flags['freshness']}". Must be one of: ${validFreshness.join(', ')}`);
+        process.exit(1);
+      }
+      // Mirror the MCP server: news defaults to past-day when no explicit filter.
+      const freshness = (flags['freshness'] ?? (type === 'news' ? 'pd' : undefined)) as import('./types/index.js').SearchOptions['freshness'] | undefined;
+      const data = await router.search(query, type, { num_results: limit, provider, freshness });
       if (asJson) console.log(JSON.stringify(data, null, 2));
-      else console.log(ResultFormatter.format(data, limit, type, { verbosity }));
+      else console.log(ResultFormatter.format(data, limit, type, { verbosity, timeFilter: freshness }));
       return;
     }
     if (cmd === 'scrape') {
@@ -96,13 +109,13 @@ async function runCliCommand(cmd: string, rest: string[], flags: Record<string, 
     if (cmd === 'rag') {
       const { buildRAGContext } = await import('./tools/RAGContext.js');
       const format = (flags['format'] === 'text' ? 'text' : 'json') as 'text' | 'json';
-      console.log(await buildRAGContext(query, { num_results: limit, output_format: format }, api));
+      console.log(await buildRAGContext(query, { num_results: limit, output_format: format }, router));
       return;
     }
     if (cmd === 'research') {
       const { runDeepResearch } = await import('./tools/DeepResearch.js');
       const depth = (flags['depth'] ?? 'basic') as import('./tools/DeepResearch.js').ResearchDepth;
-      const result = await runDeepResearch(query, depth, 'US', api);
+      const result = await runDeepResearch(query, depth, 'US', router);
       if (asJson) console.log(JSON.stringify(result, null, 2));
       else console.log(result.report);
       return;
@@ -129,6 +142,8 @@ Usage (MCP server):
 
 Usage (CLI — dev power-tool):
   npx serper-search-mcp search "react server components" --compact --limit 5
+  npx serper-search-mcp search "latest AI news" --freshness pd --limit 3   # past day (any: pd|pw|pm|py|any)
+  npx serper-search-mcp search "AI news" --type news                       # news defaults to past day
   npx serper-search-mcp scrape https://example.com --max-chars 8000
   npx serper-search-mcp research "RAG limits" --depth basic
   npx serper-search-mcp rag "transformer" --format json
@@ -138,11 +153,13 @@ Options:
   --api-key <key>          Serper API key (or set SERPER_API_KEY env)
   --transport <stdio|http> Transport mode (default: stdio)
   --port <number>          HTTP port (default: 8080)
-  --host <string>          HTTP host (default: 0.0.0.0)
+  --host <string>          HTTP host (default: 127.0.0.1; non-loopback requires --auth-token)
   --auth-token <token>     Require bearer token on HTTP /mcp (or SERPER_MCP_AUTH_TOKEN)
   --log-level <level>      error | warn | info | debug | silent (default: info)
   --compact                CLI: compact output (~800 tokens)
   --limit <n>              CLI: results 1-20 (default: 5)
+  --freshness <f>          CLI: time filter pd=past day|pw=week|pm=month|py=year|any=none (news defaults to pd)
+  --type <t>               CLI: web|images|videos|news|shopping|places|scholar|patents|autocomplete (default: web)
   --provider <name>        CLI: auto|serper|tavily|brave|exa|firecrawl|all
   --json                   CLI: raw JSON output
   --help                   Show this help
@@ -152,7 +169,12 @@ Environment variables:
   SERPER_MCP_TRANSPORT     stdio | http
   SERPER_MCP_PORT          HTTP port
   SERPER_MCP_HOST          HTTP host
-  SERPER_MCP_AUTH_TOKEN    Optional bearer token required on HTTP /mcp
+  SERPER_MCP_AUTH_TOKEN    Bearer token for HTTP /mcp (required off-loopback unless
+                         SERPER_MCP_INSECURE_NO_AUTH=true)
+  SERPER_MCP_ALLOWED_HOSTS Comma-separated extra Host values accepted on /mcp when
+                         bound to loopback (reverse proxies forwarding their domain)
+  SERPER_CACHE_PERSIST     true = persist search/scrape cache to disk (default: off)
+  SERPER_CACHE_DIR         Cache directory (default: ~/.serper-cache)
   SERPER_MCP_LOG_LEVEL     error | warn | info | debug | silent
   SERPER_CACHE_TTL_MS      Search-result cache TTL (default 600000, 0 = disabled)
   SERPER_TIMEOUT_MS        Per-request timeout (default 30000)
@@ -180,7 +202,7 @@ Tools provided:
   search_patents     Google Patents
   autocomplete       Query completions
   scrape             Fetch full page content as markdown
-  search_many        Batch: 1–10 parallel searches with dedupe (max_credits guard)
+  search_many        Batch: 1–10 parallel searches with URL dedupe across queries
   deep_research      Multi-step research: sub-queries, parallel search, LLM report (basic 3cr / standard 5cr / deep 8cr)
   search_rag_context Clean chunked text + metadata for RAG/embedding pipelines
   resolve_links      Turn google.com/goto redirect links into real URLs (free)

@@ -5,7 +5,7 @@
 
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { webcrypto, timingSafeEqual, randomUUID } from 'node:crypto';
+import { webcrypto, timingSafeEqual, randomUUID, createHash } from 'node:crypto';
 
 // Node < 19 does not expose WebCrypto as a global. The MCP Streamable HTTP
 // transport needs `globalThis.crypto` (randomUUID for SSE event ids), so
@@ -35,7 +35,7 @@ import { runBatchSearch } from '../tools/BatchSearch.js';
 import { LinkResolver } from '../tools/ResolveLinks.js';
 import { LinkMode, defaultLinkMode, shownGotoCount, unresolvedNote } from '../utils/LinkResolution.js';
 import { deepResearchLinkFooter } from '../tools/DeepResearch.js';
-import { setLogLevel, logger, setRequestId } from '../utils/Logger.js';
+import { setLogLevel, logger, withRequestId } from '../utils/Logger.js';
 import { AuthError, ValidationError } from '../utils/errors.js';
 import { snapshot as metricsSnapshot } from '../utils/Metrics.js';
 import { version } from '../../package.json';
@@ -60,15 +60,53 @@ const SEARCH_TYPE_MAP: Record<string, SearchType> = {
 export function isAuthorized(authorization: string | undefined, token: string | undefined): boolean {
   if (!token) return true;
   if (!authorization) return false;
-  const expected = `Bearer ${token}`;
-  const a = Buffer.from(authorization, 'utf8');
-  const b = Buffer.from(expected, 'utf8');
-  if (a.length !== b.length) return false;
-  try {
-    return timingSafeEqual(a, b);
-  } catch {
-    return false;
-  }
+  const match = /^Bearer[ \t]+(.+)$/i.exec(authorization);
+  if (!match) return false;
+  const a = createHash('sha256').update(match[1], 'utf8').digest();
+  const b = createHash('sha256').update(token, 'utf8').digest();
+  return timingSafeEqual(a, b);
+}
+
+/** Strip HTML, redact credential-looking tokens, and cap length before a message reaches a client. */
+export function sanitizeErrorMessage(message: string): string {
+  const noHtml = message
+    .replace(/<[^>]{1,200}>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const redacted = noHtml
+    .replace(/([?&](?:key|api[_-]?key|token|access_token)=)[^\s&"']+/gi, '$1[redacted]')
+    .replace(/\b(Bearer)\s+[A-Za-z0-9._-]{8,}/gi, '$1 [redacted]')
+    .replace(/\bsk-[A-Za-z0-9._-]{8,}/g, 'sk-[redacted]');
+  return redacted.length > 300 ? `${redacted.slice(0, 300)}...` : redacted;
+}
+
+const LOOPBACK_HOST_VALUES = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+/** Set of allowed Host-header values, or null when rebinding protection is off. */
+export function hostAllowedSet(bindHost: string): Set<string> | null {
+  const extras = (process.env.SERPER_MCP_ALLOWED_HOSTS ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const bind = (bindHost ?? '').trim().toLowerCase();
+  const loopbackBind = LOOPBACK_HOST_VALUES.has(bind);
+  if (!loopbackBind && extras.length === 0) return null;
+  const allowed = new Set<string>(['127.0.0.1', 'localhost', '::1', '[::1]']);
+  if (bind && !['0.0.0.0', '::', '[::]', '*'].includes(bind)) allowed.add(bind);
+  for (const e of extras) allowed.add(e);
+  return allowed;
+}
+
+export function isAllowedHostHeader(
+  hostHeader: string | string[] | undefined,
+  allowed: Set<string>
+): boolean {
+  const raw = Array.isArray(hostHeader) ? hostHeader[0] : hostHeader;
+  if (!raw) return false;
+  const h = raw.trim().toLowerCase();
+  if (allowed.has(h)) return true;
+  const stripped = h.replace(/:\d+$/, '');
+  return stripped !== h && allowed.has(stripped);
 }
 
 export class SerperMCPServer {
@@ -78,11 +116,14 @@ export class SerperMCPServer {
   private links: LinkResolver;
 
   constructor(options: Partial<ServerConfig> = {}) {
+    const envPort = parseInt(process.env.SERPER_MCP_PORT || '8080', 10);
+    const candidate = Number.isInteger(options.port) ? (options.port as number) : envPort;
+    const port = Number.isInteger(candidate) && candidate > 0 && candidate <= 65535 ? candidate : 8080;
     this.config = {
       apiKey:    options.apiKey    || process.env.SERPER_API_KEY    || '',
       transport: options.transport || (process.env.SERPER_MCP_TRANSPORT as 'stdio' | 'http') || 'stdio',
-      port:      options.port      || parseInt(process.env.SERPER_MCP_PORT  || '8080', 10),
-      host:      options.host      || process.env.SERPER_MCP_HOST   || '0.0.0.0',
+      port,
+      host:      options.host      || process.env.SERPER_MCP_HOST   || '127.0.0.1',
       logLevel:  options.logLevel  || process.env.SERPER_MCP_LOG_LEVEL || 'info',
       authToken: options.authToken || process.env.SERPER_MCP_AUTH_TOKEN || undefined,
     };
@@ -114,8 +155,8 @@ export class SerperMCPServer {
       tools: SearchTools.getAllTools(),
     }));
 
-    server.setRequestHandler(CallToolRequestSchema, async (req) => {
-      setRequestId(randomUUID().slice(0, 8));
+    server.setRequestHandler(CallToolRequestSchema, (req) =>
+      withRequestId(randomUUID().slice(0, 8), async () => {
       const { name, arguments: args } = req.params;
 
       const knownTool =
@@ -166,7 +207,7 @@ export class SerperMCPServer {
               freshness:   a['freshness'] as SearchOptions['freshness'],
               safesearch:  (a['safesearch']  as SearchOptions['safesearch']) ?? 'moderate',
             },
-            this.api
+            this.router
           );
           return { content: [{ type: 'text', text }] };
         }
@@ -177,7 +218,7 @@ export class SerperMCPServer {
             a['query'] as string,
             (a['depth'] as ResearchDepth) ?? 'standard',
             (a['country'] as string) ?? 'US',
-            this.api
+            this.router
           );
 
           const header = [
@@ -207,7 +248,7 @@ export class SerperMCPServer {
               output_format:   (a['output_format']   as 'json' | 'text') ?? 'json',
               link_resolution: (a['link_resolution'] as LinkMode | undefined) ?? defaultLinkMode(),
             },
-            this.api,
+            this.router,
             this.links
           );
           return { content: [{ type: 'text', text }] };
@@ -237,13 +278,12 @@ export class SerperMCPServer {
 
       } catch (err) {
         if (err instanceof McpError) throw err;
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = sanitizeErrorMessage(err instanceof Error ? err.message : String(err));
         if (err instanceof ValidationError) throw new McpError(ErrorCode.InvalidParams, msg);
         throw new McpError(ErrorCode.InternalError, msg);
-      } finally {
-        setRequestId('');
       }
-    });
+      })
+    );
 
     server.onerror = (err) => logger.error('[MCP error]', err);
   }
@@ -261,7 +301,6 @@ export class SerperMCPServer {
       freshness:    (args['freshness']    as SearchOptions['freshness'])
                     ?? (searchType === 'news' ? 'pd' : undefined),
       safesearch:   (args['safesearch']   as SearchOptions['safesearch']) ?? 'moderate',
-      summary:      (args['summary']      as boolean) ?? false,
       autocorrect:  (args['autocorrect']  as boolean) ?? true,
       page:         (args['page']         as number)  ?? 1,
       verbosity,
@@ -278,12 +317,17 @@ export class SerperMCPServer {
     }
 
     const data = await this.router.search(query, searchType, opts);
+    const timeFilter = (args['freshness'] as SearchOptions['freshness'] | undefined) ?? (searchType === 'news' ? 'pd' : undefined);
     const render = (d: typeof data) => searchType === 'places'
       ? this.formatPlacesWithFilters(d, numResults, args, maxChars)
       : ResultFormatter.format(d, numResults, searchType, {
           verbosity,
           maxChars,
           snippetsOnly: opts.snippets_only,
+          timeFilter,
+          layout: args['layout'] as string | undefined,
+          size: args['size'] as string | undefined,
+          orientation: args['orientation'] as string | undefined,
         });
     const r = await this.links.apply(data, {
       mode: opts.link_resolution ?? 'auto',
@@ -306,6 +350,7 @@ export class SerperMCPServer {
     const filtered = ResultFormatter.formatPlaces(data.places ?? [], numResults, {
       minRating: Number.isFinite(minRating as number) ? (minRating as number) : undefined,
       sortBy: sortBy === 'rating' || sortBy === 'reviews' ? sortBy : undefined,
+      compact: (args['verbosity'] as string | undefined) === 'compact',
     });
     // Compose final output manually: filtered rows + credit footer.
     const footer = `\n\n---\n*Provider: ${data.provider ?? 'serper'} · Cache: ${data.cache_hit ? 'hit (0 credits)' : 'miss'}${data.credits !== undefined ? ` · Serper credits used: ${data.credits}` : ''}*`;
@@ -322,16 +367,34 @@ export class SerperMCPServer {
    *   GET  /health  container/load-balancer health probe
    */
   private async runHttp(): Promise<void> {
+    const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost', '[::1]']);
+    const insecureOptOut = ['1', 'true', 'yes'].includes(
+      (process.env.SERPER_MCP_INSECURE_NO_AUTH ?? '').toLowerCase()
+    );
+    if (!this.config.authToken && !LOOPBACK_HOSTS.has(this.config.host) && !insecureOptOut) {
+      throw new AuthError(
+        `Refusing to serve HTTP on ${this.config.host} without SERPER_MCP_AUTH_TOKEN. ` +
+        'Set SERPER_MCP_AUTH_TOKEN, keep the default host 127.0.0.1 (reverse proxy), ' +
+        'or set SERPER_MCP_INSECURE_NO_AUTH=true if authentication is handled elsewhere.'
+      );
+    }
+
     const MAX_BODY_BYTES = 256 * 1024;
-    const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-      // Correlate every log line emitted while handling this request.
-      setRequestId(randomUUID().slice(0, 8));
+    const allowedHosts = hostAllowedSet(this.config.host);
+    const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+      void withRequestId(randomUUID().slice(0, 8), async () => {
       try {
         // ── Body-size guard: reject oversized requests before buffering ──────
         const contentLength = Number(req.headers['content-length']);
         if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
           res.writeHead(413, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: `Request body too large (max ${MAX_BODY_BYTES} bytes)` }));
+          return;
+        }
+        const transferEncoding = req.headers['transfer-encoding'];
+        if (transferEncoding && String(transferEncoding).toLowerCase().includes('chunked') && !req.headers['content-length']) {
+          res.writeHead(411, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Content-Length required (chunked bodies are not accepted)' }));
           return;
         }
         const pathname = (req.url ?? '/').split('?')[0];
@@ -350,6 +413,15 @@ export class SerperMCPServer {
         }
 
         if (pathname === '/mcp') {
+          if (allowedHosts && !isAllowedHostHeader(req.headers.host, allowedHosts)) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              error:
+                'Forbidden: Host header not allowed (DNS rebinding protection). ' +
+                'If you are behind a reverse proxy, set SERPER_MCP_ALLOWED_HOSTS=<your domain>.',
+            }));
+            return;
+          }
           if (!isAuthorized(req.headers.authorization, this.config.authToken)) {
             res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' });
             res.end(JSON.stringify({ error: 'Unauthorized — send Authorization: Bearer <SERPER_MCP_AUTH_TOKEN>' }));
@@ -371,10 +443,9 @@ export class SerperMCPServer {
         res.end(JSON.stringify({ error: 'Not found. MCP endpoint: POST /mcp' }));
       } catch (err) {
         if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
-      } finally {
-        setRequestId('');
+        res.end(JSON.stringify({ error: sanitizeErrorMessage(err instanceof Error ? err.message : String(err)) }));
       }
+      });
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -406,8 +477,15 @@ export class SerperMCPServer {
     }
 
     const server = this.buildServer();
-    process.on('SIGINT',  () => server.close().then(() => process.exit(0)));
-    process.on('SIGTERM', () => server.close().then(() => process.exit(0)));
+    const shutdownStdio = () => {
+      server
+        .close()
+        .then(() => process.exit(0))
+        .catch(() => process.exit(1));
+      setTimeout(() => process.exit(0), 10_000).unref();
+    };
+    process.on('SIGINT', shutdownStdio);
+    process.on('SIGTERM', shutdownStdio);
 
     await server.connect(new StdioServerTransport());
     logger.info(`Serper Search MCP Server v${version} — SMLabs AI`);

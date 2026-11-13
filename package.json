@@ -1,6 +1,6 @@
 {
   "name": "serper-search-mcp",
-  "version": "4.0.1",
+  "version": "4.1.0",
   "mcpName": "io.github.smjahid012/serper-search-mcp",
   "description": "MCP server for Serper API — Google web, image, video, news, shopping, and places search for AI agents",
   "main": "index.js",

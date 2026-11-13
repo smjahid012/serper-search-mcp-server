@@ -44,18 +44,23 @@ function normalizeLevel(value) {
 function setLogLevel(level) {
   current = normalizeLevel(level);
 }
-function setRequestId(id) {
-  requestId = id;
+function withRequestId(id, fn) {
+  return requestStore.run(id, fn);
+}
+function getRequestId() {
+  return requestStore.getStore() ?? fallbackRequestId;
 }
 function emit(level, args) {
   if (LEVEL_ORDER[level] > LEVEL_ORDER[current]) return;
-  const prefix = requestId ? `[serper-mcp][${requestId}]` : "[serper-mcp]";
+  const id = getRequestId();
+  const prefix = id ? `[serper-mcp][${id}]` : "[serper-mcp]";
   console.error(prefix, ...args);
 }
-var LEVEL_ORDER, current, requestId, logger;
+var import_node_async_hooks, LEVEL_ORDER, current, requestStore, fallbackRequestId, logger;
 var init_Logger = __esm({
   "src/utils/Logger.ts"() {
     "use strict";
+    import_node_async_hooks = require("node:async_hooks");
     LEVEL_ORDER = {
       silent: -1,
       error: 0,
@@ -64,7 +69,8 @@ var init_Logger = __esm({
       debug: 3
     };
     current = normalizeLevel(process.env.SERPER_MCP_LOG_LEVEL);
-    requestId = "";
+    requestStore = new import_node_async_hooks.AsyncLocalStorage();
+    fallbackRequestId = "";
     logger = {
       error: (...args) => emit("error", args),
       warn: (...args) => emit("warn", args),
@@ -106,16 +112,42 @@ async function fetchWithRetry(url, init, options = {}) {
       failure = new Error(
         aborted ? `${prefix}: request timed out after ${timeoutMs}ms` : `${prefix}: ${err instanceof Error ? err.message : String(err)}`
       );
-    } finally {
       clearTimeout(timer);
     }
     if (response) {
-      if (response.ok) return response;
-      const msg = await response.text().catch(() => response.statusText);
-      failure = new Error(`${prefix} ${response.status}: ${msg}`);
-      failure.status = response.status;
-      if (!isRetryableStatus(response.status)) throw failure;
-      retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
+      if (response.ok) {
+        try {
+          const text = await response.text();
+          clearTimeout(timer);
+          if (response.status === 204 || response.status === 205 || response.status === 304) {
+            return new Response(null, {
+              status: response.status,
+              statusText: response.statusText,
+              headers: response.headers
+            });
+          }
+          return new Response(text, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers
+          });
+        } catch (err) {
+          const aborted = err instanceof Error && err.name === "AbortError";
+          failure = new Error(
+            aborted ? `${prefix}: request timed out after ${timeoutMs}ms` : `${prefix}: ${err instanceof Error ? err.message : String(err)}`
+          );
+          clearTimeout(timer);
+          response = null;
+        }
+      } else {
+        const errResponse = response;
+        const msg = await errResponse.text().catch(() => errResponse.statusText);
+        clearTimeout(timer);
+        failure = new Error(`${prefix} ${errResponse.status}: ${msg}`);
+        failure.status = errResponse.status;
+        if (!isRetryableStatus(errResponse.status)) throw failure;
+        retryAfterMs = parseRetryAfter(errResponse.headers.get("retry-after"));
+      }
     }
     lastError = failure;
     if (attempt < retries) {
@@ -228,9 +260,13 @@ var init_TtlCache = __esm({
         this.ttlMs = ttlMs;
         this.maxEntries = maxEntries;
         this.store = /* @__PURE__ */ new Map();
+        this.pendingFlush = false;
         this.persistPath = persistPath;
         if (this.persistPath) {
           this.loadFromDisk();
+          process.on("exit", () => {
+            if (this.pendingFlush) this.flushToDisk();
+          });
         }
       }
       loadFromDisk() {
@@ -247,11 +283,17 @@ var init_TtlCache = __esm({
               }
             }
           }
+          while (this.store.size > this.maxEntries) {
+            const oldest = this.store.keys().next().value;
+            if (oldest === void 0) break;
+            this.store.delete(oldest);
+          }
         } catch {
         }
       }
       scheduleSave() {
         if (!this.persistPath || this.ttlMs <= 0) return;
+        this.pendingFlush = true;
         if (this.saveTimeout) clearTimeout(this.saveTimeout);
         this.saveTimeout = setTimeout(() => {
           this.flushToDisk();
@@ -262,6 +304,7 @@ var init_TtlCache = __esm({
       }
       flushToDisk() {
         if (!this.persistPath) return;
+        this.pendingFlush = false;
         try {
           const now = Date.now();
           const validEntries = [];
@@ -272,9 +315,15 @@ var init_TtlCache = __esm({
           }
           const dir = (0, import_node_path.dirname)(this.persistPath);
           if (!(0, import_node_fs.existsSync)(dir)) {
-            (0, import_node_fs.mkdirSync)(dir, { recursive: true });
+            (0, import_node_fs.mkdirSync)(dir, { recursive: true, mode: 448 });
           }
-          (0, import_node_fs.writeFileSync)(this.persistPath, JSON.stringify(validEntries), "utf-8");
+          try {
+            (0, import_node_fs.chmodSync)(dir, 448);
+          } catch {
+          }
+          const tmp = `${this.persistPath}.${process.pid}.tmp`;
+          (0, import_node_fs.writeFileSync)(tmp, JSON.stringify(validEntries), { encoding: "utf-8", mode: 384 });
+          (0, import_node_fs.renameSync)(tmp, this.persistPath);
         } catch {
         }
       }
@@ -299,7 +348,7 @@ var init_TtlCache = __esm({
           if (oldest === void 0) break;
           this.store.delete(oldest);
         }
-        this.flushToDisk();
+        this.scheduleSave();
       }
       get size() {
         return this.store.size;
@@ -345,7 +394,8 @@ function numberFromEnv(name, fallback) {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 function getPersistPath(name) {
-  if (process.env.SERPER_CACHE_PERSIST === "false") return void 0;
+  const raw = (process.env.SERPER_CACHE_PERSIST ?? "").toLowerCase();
+  if (!PERSIST_TRUE.has(raw)) return void 0;
   const dir = process.env.SERPER_CACHE_DIR || import_node_path2.default.join(import_node_os.default.homedir(), ".serper-cache");
   return import_node_path2.default.join(dir, `${name}.json`);
 }
@@ -360,18 +410,19 @@ function buildSearchBody(query, options) {
     hl: options.search_lang ?? options.ui_lang ?? "en",
     autocorrect: options.autocorrect ?? true
   };
-  if (options.freshness) body.tbs = `qdr:${options.freshness}`;
+  const TBS_QUICK_DATE = { pd: "d", pw: "w", pm: "m", py: "y" };
+  if (options.freshness && options.freshness !== "any") body.tbs = `qdr:${TBS_QUICK_DATE[options.freshness] ?? options.freshness}`;
   if (options.safesearch === "strict") body.safe = "active";
   if (options.safesearch === "off") body.safe = "off";
-  if (options.summary) body.summary = true;
   if (options.page && options.page > 1) body.page = options.page;
   if (options.link_resolution === "none") body.resolveLinks = false;
   return body;
 }
-var import_node_os, import_node_path2, ENDPOINT_MAP, SCRAPE_ENDPOINT, RESOLVE_ENDPOINT, RESOLVE_TIMEOUT_MS, LOCAL_FIELDS, SerperAPI;
+var import_node_crypto, import_node_os, import_node_path2, ENDPOINT_MAP, SCRAPE_ENDPOINT, RESOLVE_ENDPOINT, RESOLVE_TIMEOUT_MS, LOCAL_FIELDS, PERSIST_TRUE, SerperAPI;
 var init_SerperAPI = __esm({
   "src/api/SerperAPI.ts"() {
     "use strict";
+    import_node_crypto = require("node:crypto");
     import_node_os = __toESM(require("node:os"));
     import_node_path2 = __toESM(require("node:path"));
     init_HttpRetry();
@@ -394,9 +445,11 @@ var init_SerperAPI = __esm({
     RESOLVE_ENDPOINT = "https://google.serper.dev/resolve";
     RESOLVE_TIMEOUT_MS = 12e4;
     LOCAL_FIELDS = ["retryAfter", "credits", "provider", "cache_hit"];
+    PERSIST_TRUE = /* @__PURE__ */ new Set(["true", "1", "yes"]);
     SerperAPI = class {
       constructor(apiKey, options = {}) {
         this.apiKey = apiKey;
+        this.keyScope = (0, import_node_crypto.createHash)("sha256").update(String(apiKey)).digest("hex").slice(0, 12);
         this.timeoutMs = options.timeoutMs ?? numberFromEnv("SERPER_TIMEOUT_MS", 3e4);
         this.retries = options.retries ?? numberFromEnv("SERPER_RETRIES", 2);
         this.baseDelayMs = options.baseDelayMs ?? numberFromEnv("SERPER_RETRY_BASE_MS", 500);
@@ -411,7 +464,7 @@ var init_SerperAPI = __esm({
         const url = ENDPOINT_MAP[searchType] ?? ENDPOINT_MAP.web;
         const body = buildSearchBody(query, options);
         const cacheQuery = body.q.toLowerCase();
-        const cacheKey = `${searchType}:${JSON.stringify({ ...body, q: cacheQuery })}`;
+        const cacheKey = `${this.keyScope}:${searchType}:${JSON.stringify({ ...body, q: cacheQuery })}`;
         increment("searches");
         const cached = this.cache?.get(cacheKey);
         if (cached) {
@@ -437,7 +490,7 @@ var init_SerperAPI = __esm({
           includeLinks: options.includeLinks ?? false,
           includeVideos: options.includeVideos ?? false
         };
-        const cacheKey = `scrape:${normalizedUrl.toLowerCase()}:${JSON.stringify(body)}`;
+        const cacheKey = `${this.keyScope}:scrape:${JSON.stringify(body)}`;
         const cached = this.scrapeCache?.get(cacheKey);
         if (cached) {
           logger.debug("SerperAPI: cache hit (scrape)");
@@ -461,8 +514,12 @@ var init_SerperAPI = __esm({
         for (let attempts = 1; ; attempts++) {
           const body = Object.fromEntries(Object.entries(current2).filter(([k]) => !LOCAL_FIELDS.includes(k)));
           const started = Date.now();
+          const remaining = Math.max(0, deadline - started);
+          const perAttempt = Math.max(1, Math.min(Math.max(this.timeoutMs, RESOLVE_TIMEOUT_MS), Math.max(remaining, this.timeoutMs)));
+          const retries = Math.min(this.retries, Math.max(0, Math.floor(remaining / perAttempt) - 1));
           const out = await this.post(RESOLVE_ENDPOINT, body, {
-            timeoutMs: Math.max(this.timeoutMs, RESOLVE_TIMEOUT_MS),
+            timeoutMs: perAttempt,
+            retries,
             errorPrefix: "Serper /resolve error"
           });
           checkResolveShape(body, out);
@@ -489,7 +546,7 @@ var init_SerperAPI = __esm({
           },
           {
             timeoutMs: overrides.timeoutMs ?? this.timeoutMs,
-            retries: this.retries,
+            retries: overrides.retries ?? this.retries,
             baseDelayMs: this.baseDelayMs,
             errorPrefix: overrides.errorPrefix ?? "Serper API error"
           }
@@ -745,22 +802,22 @@ function serperAdapter(api) {
     scrape: (url) => api.scrape(url)
   };
 }
-function isFailoverError(err, data) {
-  if (data && !(data.organic?.length || data.images?.length || data.places?.length || data.news?.length)) {
-    return true;
-  }
-  if (err instanceof ProviderError) {
-    if (err.status === 402 || err.status === 429 || err.status !== void 0 && err.status >= 500) return true;
-  }
-  const msg = err instanceof Error ? err.message : String(err ?? "");
-  return FAILOVER_PATTERNS.some((re) => re.test(msg));
+function resultsOf(data, type) {
+  const value = type === "patents" ? data.patents ?? data.organic : data[RESULT_FIELD[type]];
+  return Array.isArray(value) ? value : [];
+}
+function isEmptyResults(data, type) {
+  return resultsOf(data, type).length === 0;
+}
+function supportsType(provider, type) {
+  return provider.name === "serper" || type === "web";
 }
 function fuseRRF(lists, k = 60) {
   const scores = /* @__PURE__ */ new Map();
   for (const list of lists) {
-    const organic = list[0]?.organic ?? [];
-    organic.forEach((item, rank) => {
-      const key = item.link || item.title;
+    list.forEach((item, rank) => {
+      const rec = item ?? {};
+      const key = String(rec.link ?? rec.imageUrl ?? rec.title ?? item);
       const prev = scores.get(key);
       const score = (prev?.score ?? 0) + 1 / (k + rank + 1);
       scores.set(key, { score, item });
@@ -768,7 +825,7 @@ function fuseRRF(lists, k = 60) {
   }
   return [...scores.values()].sort((a, b) => b.score - a.score).map((s) => s.item);
 }
-var FAILOVER_PATTERNS, ProviderRouter;
+var RESULT_FIELD, ProviderRouter;
 var init_Router = __esm({
   "src/api/providers/Router.ts"() {
     "use strict";
@@ -780,9 +837,20 @@ var init_Router = __esm({
     init_BraveProvider();
     init_ExaProvider();
     init_FirecrawlProvider();
-    FAILOVER_PATTERNS = [/402/, /429/, /5\d\d/, /payment/i, /quota/i, /rate limit/i, /empty/i];
+    RESULT_FIELD = {
+      web: "organic",
+      images: "images",
+      videos: "videos",
+      news: "news",
+      shopping: "shopping",
+      places: "places",
+      scholar: "organic",
+      patents: "patents",
+      autocomplete: "suggestions"
+    };
     ProviderRouter = class {
       constructor(api) {
+        this.api = api;
         this.providers = [
           serperAdapter(api),
           new TavilyProvider(),
@@ -790,6 +858,9 @@ var init_Router = __esm({
           new ExaProvider(),
           new FirecrawlProvider()
         ];
+      }
+      resolve(payload, maxWaitS) {
+        return this.api.resolve(payload, maxWaitS);
       }
       providerNames() {
         return this.providers.filter((p) => p.isConfigured()).map((p) => p.name);
@@ -799,27 +870,30 @@ var init_Router = __esm({
         const order = providerOrderFromEnv();
         const fallback = isFallbackEnabled();
         if (requested === "all") {
-          const active = this.providers.filter((p) => p.isConfigured());
+          const active = this.providers.filter((p) => p.isConfigured() && supportsType(p, type));
           const settled = await Promise.allSettled(active.map((p) => p.search(query, type, opts)));
           const ok = [];
           for (const [i, s] of settled.entries()) {
             if (s.status === "fulfilled") {
-              ok.push([s.value]);
+              const rows = resultsOf(s.value, type);
+              if (rows.length) ok.push(rows);
             } else {
               increment("provider_errors");
               logger.warn(`Provider ${active[i]?.name} failed in fan-out (${s.reason instanceof Error ? s.reason.message : s.reason}) \u2014 excluded from fusion`);
             }
           }
-          const fused = fuseRRF(ok);
           return {
             searchParameters: { q: query, type },
-            organic: fused,
+            [RESULT_FIELD[type]]: fuseRRF(ok),
             provider: "all"
           };
         }
         if (requested !== "auto") {
           const pinned = this.providers.find((p) => p.name === requested);
           if (!pinned) throw new ValidationError(`Unknown provider: ${requested}`);
+          if (!supportsType(pinned, type)) {
+            throw new ValidationError(`Provider ${requested} supports web only \u2014 use serper or auto for ${type} searches`);
+          }
           try {
             const data = await pinned.search(query, type, opts);
             return { ...data, provider: pinned.name };
@@ -829,13 +903,13 @@ var init_Router = __esm({
             throw new ProviderError(err instanceof Error ? err.message : String(err), { provider: pinned.name, cause: err });
           }
         }
-        const chain = order.map((n) => this.providers.find((p) => p.name === n)).filter((p) => Boolean(p && p.isConfigured()));
+        const chain = order.map((n) => this.providers.find((p) => p.name === n)).filter((p) => Boolean(p && p.isConfigured() && supportsType(p, type)));
         let lastError = null;
         for (const provider of chain) {
           try {
             const data = await provider.search(query, type, opts);
             if (!fallback) return { ...data, provider: provider.name };
-            if (isFailoverError(null, data) && chain.length > 1) {
+            if (isEmptyResults(data, type) && chain.length > 1) {
               logger.warn(`Provider ${provider.name} returned empty \u2014 failing over\u2026`);
               increment("failover_events");
               lastError = new ProviderError(`${provider.name} returned empty results`, { provider: provider.name });
@@ -877,10 +951,36 @@ function effectiveFetchCount(requested, verbosity, searchType) {
   if (verbosity === "compact") return Math.min(5, def);
   return def;
 }
-var ResultFormatter;
+function filterImages(results, opts) {
+  let out = results;
+  if (opts.size && SIZE_RANGES[opts.size]) {
+    const [lo, hi] = SIZE_RANGES[opts.size];
+    out = out.filter((r) => {
+      if (!r.imageWidth || !r.imageHeight) return true;
+      const longest = Math.max(r.imageWidth, r.imageHeight);
+      return longest >= lo && longest < hi;
+    });
+  }
+  if (opts.orientation) {
+    out = out.filter((r) => {
+      if (!r.imageWidth || !r.imageHeight) return true;
+      if (opts.orientation === "landscape") return r.imageWidth > r.imageHeight;
+      if (opts.orientation === "portrait") return r.imageHeight > r.imageWidth;
+      return r.imageWidth === r.imageHeight;
+    });
+  }
+  return out;
+}
+var SIZE_RANGES, ResultFormatter;
 var init_ResultFormatter = __esm({
   "src/utils/ResultFormatter.ts"() {
     "use strict";
+    SIZE_RANGES = {
+      small: [0, 640],
+      medium: [640, 1280],
+      large: [1280, 2e3],
+      xlarge: [2e3, Infinity]
+    };
     ResultFormatter = class {
       static format(data, maxResults, searchType, opts = {}) {
         const verbosity = resolveVerbosity(opts.verbosity, searchType);
@@ -952,9 +1052,9 @@ var init_ResultFormatter = __esm({
           parts.push("\n### \u{1F4AC} People Also Ask\n");
           for (const paa of data.peopleAlsoAsk.slice(0, 4)) {
             parts.push(`**Q: ${paa.question}**`);
-            parts.push(`${paa.snippet}`);
-            parts.push(`[Read more](${paa.link})
-`);
+            if (paa.snippet) parts.push(paa.snippet);
+            if (paa.link) parts.push(`[Read more](${paa.link})`);
+            parts.push("");
           }
         }
         if (searchType === "web" && showRich && data.relatedSearches?.length) {
@@ -966,6 +1066,12 @@ var init_ResultFormatter = __esm({
         if (data.credits !== void 0) footer.push(`Serper credits used: ${data.credits}`);
         const provider = data.provider ?? "serper";
         const cacheHit = data.cache_hit === true;
+        const TIME_LABELS = { pd: "past day", pw: "past week", pm: "past month", py: "past year", any: "none (opt-out)" };
+        if (searchType === "web" || searchType === "news") {
+          footer.push(`Time filter: ${opts.timeFilter ? TIME_LABELS[opts.timeFilter] ?? opts.timeFilter : "none (all time)"}`);
+        } else if (opts.timeFilter) {
+          footer.push(`Time filter: ${TIME_LABELS[opts.timeFilter] ?? opts.timeFilter}`);
+        }
         if (verbosity === "compact") {
           footer.push("Tokens: ~800 (compact) \xB7 upgrade with verbosity=full");
         }
@@ -1005,6 +1111,7 @@ var init_ResultFormatter = __esm({
         return out;
       }
       static formatImages(results, max, opts = {}) {
+        results = filterImages(results, opts);
         if (!results.length) return ["*No image results found.*"];
         if (opts.layout === "gallery") {
           const out2 = ["### \u{1F5BC}\uFE0F Image Results (gallery)\n"];
@@ -1091,6 +1198,16 @@ var init_ResultFormatter = __esm({
         if (filters.sortBy === "reviews") list.sort((a, b) => (b.ratingCount ?? 0) - (a.ratingCount ?? 0));
         const out = ["### \u{1F4CD} Place Results\n"];
         for (const [i, r] of list.slice(0, max).entries()) {
+          if (filters.compact) {
+            out.push(`#### ${i + 1}. ${r.title}`);
+            if (r.rating) {
+              const stars = "\u2B50".repeat(Math.round(r.rating));
+              out.push(`- **Rating:** ${stars} ${r.rating}${r.ratingCount ? ` (${r.ratingCount.toLocaleString()} reviews)` : ""}`);
+            }
+            if (r.address) out.push(`- **Address:** ${r.address}`);
+            out.push("");
+            continue;
+          }
           out.push(`#### ${i + 1}. ${r.title}${r.category ? ` *${r.category}*` : ""}`);
           if (r.address) out.push(`- **Address:** ${r.address}`);
           if (r.phoneNumber) out.push(`- **Phone:** ${r.phoneNumber}`);
@@ -1266,12 +1383,12 @@ async function callOpenRouter(config, prompt) {
   return data.choices?.[0]?.message?.content ?? "";
 }
 async function callGemini(config, prompt) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:generateContent?key=${config.apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:generateContent`;
   const res = await fetchWithRetry(
     url,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-goog-api-key": config.apiKey },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { maxOutputTokens: 4096 }
@@ -1343,6 +1460,24 @@ Research question: "${query}"
 
 Return ONLY a JSON array of strings, no explanation, no markdown, no code fences. Example: ["query one","query two","query three"]`;
   const { content } = await callLLM(prompt);
+  const variants = [
+    query,
+    `${query} overview`,
+    `${query} latest research`,
+    `${query} key facts`,
+    `${query} examples`,
+    `${query} comparison`,
+    `${query} statistics`,
+    `${query} recent developments`
+  ];
+  const pad = (list) => {
+    const out = list.slice(0, count);
+    for (const v of variants) {
+      if (out.length >= count) break;
+      if (!out.includes(v)) out.push(v);
+    }
+    return out;
+  };
   try {
     const clean = content.replace(/```[a-z]*\n?/g, "").replace(/```/g, "").trim();
     const parsed = JSON.parse(clean);
@@ -1351,19 +1486,19 @@ Return ONLY a JSON array of strings, no explanation, no markdown, no code fences
     }
   } catch {
     const matches = content.match(/"([^"]+)"/g);
-    if (matches) return matches.slice(0, count).map((m) => m.replace(/"/g, ""));
+    if (matches) return pad(matches.map((m) => m.replace(/"/g, "")));
   }
-  return [query, `${query} overview`, `${query} latest research`].slice(0, count);
+  return variants.slice(0, count);
 }
-async function runSearches(subQueries, resultsPerQuery, api, country) {
+async function runSearches(subQueries, resultsPerQuery, router, country) {
   const searches = subQueries.map((sq) => async () => {
     try {
-      const data = await api.search(sq, "web", { num_results: resultsPerQuery, country });
+      const data = await router.search(sq, "web", { num_results: resultsPerQuery, country });
       let results = (data.organic ?? []).slice(0, resultsPerQuery);
       let resolveError;
       if (countGotoLinks(results)) {
         try {
-          const r = await api.resolve({ links: results.map((x) => x.link) });
+          const r = await router.resolve({ links: results.map((x) => x.link) });
           const links = r.data["links"];
           results = results.map((x, i) => typeof links[i] === "string" ? { ...x, link: links[i] } : x);
         } catch (err) {
@@ -1381,26 +1516,40 @@ function buildContext(searchResults) {
   const sections = [];
   const gotoSources = [];
   let sourceCount = 0;
-  for (const { subQuery, results } of searchResults) {
+  let length = 0;
+  let truncated = false;
+  const budget = MAX_RESEARCH_CONTEXT_CHARS;
+  outer: for (const { subQuery, results } of searchResults) {
     if (!results.length) continue;
-    sections.push(`### Sub-query: "${subQuery}"
-`);
+    const header = `### Sub-query: "${subQuery}"
+`;
+    if (length + header.length > budget) {
+      truncated = true;
+      break;
+    }
+    sections.push(header);
+    length += header.length + 1;
     for (const r of results) {
-      sourceCount++;
-      if (isGotoLink(r.link)) gotoSources.push({ n: sourceCount, link: r.link });
-      sections.push(`**[${sourceCount}] ${r.title}**`);
-      sections.push(`URL: ${r.link}`);
-      if (r.snippet) sections.push(`Snippet: ${r.snippet}`);
-      if (r.date) sections.push(`Date: ${r.date}`);
-      sections.push("");
+      const block = [];
+      const n = sourceCount + 1;
+      block.push(`**[${n}] ${r.title}**`);
+      block.push(`URL: ${r.link}`);
+      if (r.snippet) block.push(`Snippet: ${r.snippet}`);
+      if (r.date) block.push(`Date: ${r.date}`);
+      block.push("");
+      const text = block.join("\n") + "\n";
+      if (length + text.length > budget) {
+        truncated = true;
+        break outer;
+      }
+      sourceCount = n;
+      if (isGotoLink(r.link)) gotoSources.push({ n, link: r.link });
+      sections.push(text);
+      length += text.length + 1;
     }
   }
   let context = sections.join("\n");
-  let truncated = false;
-  if (context.length > MAX_RESEARCH_CONTEXT_CHARS) {
-    context = context.slice(0, MAX_RESEARCH_CONTEXT_CHARS) + "\n\n\u2026[context truncated to 12k chars]";
-    truncated = true;
-  }
+  if (truncated) context += "\n\n\u2026[context truncated to 12k chars]";
   return { context, sourceCount, truncated, gotoSources };
 }
 async function synthesizeReport(query, context, depth) {
@@ -1423,9 +1572,14 @@ ${context}
 
 Write the research report now:`;
   const { content, provider, model } = await callLLM(prompt);
+  if (!content.trim()) {
+    throw new Error(
+      `LLM (${provider}/${model}) returned an empty report \u2014 retry, or switch OPENROUTER_API_KEY / GEMINI_API_KEY`
+    );
+  }
   return { report: content, provider, model };
 }
-async function runDeepResearch(query, depth = "standard", country = "US", api) {
+async function runDeepResearch(query, depth = "standard", country = "US", router) {
   const llmConfig = getLLMProvider();
   if (!llmConfig) {
     throw new Error(
@@ -1434,7 +1588,7 @@ async function runDeepResearch(query, depth = "standard", country = "US", api) {
   }
   const { subQueries: subQueryCount, resultsPerQuery } = DEPTH_CONFIG[depth] ?? DEPTH_CONFIG.standard;
   const subQueries = await generateSubQueries(query, subQueryCount);
-  const searchResults = await runSearches(subQueries, resultsPerQuery, api, country);
+  const searchResults = await runSearches(subQueries, resultsPerQuery, router, country);
   const { context, sourceCount, gotoSources } = buildContext(searchResults);
   const resolveErrors = [...new Set(searchResults.map((s) => s.resolveError).filter((e) => Boolean(e)))];
   if (!sourceCount) {
@@ -1531,14 +1685,15 @@ function buildChunks(results, maxChunkWords, includeSnippet) {
 function paaChunks(data, startIndex) {
   if (!data.peopleAlsoAsk?.length) return [];
   return data.peopleAlsoAsk.slice(0, 4).map((paa, i) => {
-    const text = `Q: ${paa.question} A: ${cleanText(paa.snippet)}`;
+    const answer = paa.snippet ? cleanText(paa.snippet) : "";
+    const text = answer ? `Q: ${paa.question} A: ${answer}` : `Q: ${paa.question}`;
     return {
       chunk_index: startIndex + i,
       source_index: 0,
       // 0 = PAA, not an organic result
       title: paa.question,
-      url: paa.link,
-      domain: extractDomain(paa.link),
+      url: paa.link ?? "",
+      domain: paa.link ? extractDomain(paa.link) : "",
       date: null,
       text,
       word_count: text.split(/\s+/).length,
@@ -1546,7 +1701,7 @@ function paaChunks(data, startIndex) {
     };
   });
 }
-async function buildRAGContext(query, options, api, links) {
+async function buildRAGContext(query, options, router, links) {
   const {
     num_results = 10,
     country = "US",
@@ -1557,7 +1712,7 @@ async function buildRAGContext(query, options, api, links) {
     link_resolution = "auto"
   } = options;
   const chunkWords = Math.min(1e3, Math.max(50, Math.floor(Number(max_chunk_words)) || 200));
-  const data = await api.search(query, "web", { num_results, country, freshness, autocorrect: true, link_resolution });
+  const data = await router.search(query, "web", { num_results, country, freshness, autocorrect: true, link_resolution });
   const render = (d, state) => renderRAG(query, d, chunkWords, include_paa, output_format, state);
   if (!links) return render(data, { unresolved: 0, searchId: null, retryAfter: null });
   const countShown = (d) => countGotoLinks(d.organic ?? []) + (include_paa ? countGotoLinks((d.peopleAlsoAsk ?? []).slice(0, 4).map((p) => p.link)) : 0);
@@ -1616,7 +1771,7 @@ module.exports = __toCommonJS(index_exports);
 
 // src/server/SerperMCPServer.ts
 var import_node_http = require("node:http");
-var import_node_crypto2 = require("node:crypto");
+var import_node_crypto3 = require("node:crypto");
 var import_server = require("@modelcontextprotocol/sdk/server/index.js");
 var import_stdio = require("@modelcontextprotocol/sdk/server/stdio.js");
 var import_streamableHttp = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
@@ -1628,7 +1783,7 @@ init_errors();
 init_LinkResolution();
 
 // src/tools/ResolveLinks.ts
-var import_node_crypto = require("node:crypto");
+var import_node_crypto2 = require("node:crypto");
 init_errors();
 init_LinkResolution();
 var SEARCH_CACHE_MAX = 50;
@@ -1669,7 +1824,7 @@ var LinkResolver = class {
     return res;
   }
   remember(entry) {
-    const id = (0, import_node_crypto.randomBytes)(16).toString("base64url");
+    const id = (0, import_node_crypto2.randomBytes)(16).toString("base64url");
     this.searches.set(id, entry);
     while (this.searches.size > SEARCH_CACHE_MAX) {
       this.searches.delete(this.searches.keys().next().value);
@@ -1782,7 +1937,7 @@ var SearchTools = class {
     return { num_results: { type: "number", description: `Results (1\u2013${max}, default ${def}). Note: >10 results uses 2 Serper credits.`, minimum: 1, maximum: max, default: def } };
   }
   static freshness(def) {
-    return { freshness: { type: "string", description: `Time filter: pd=day pw=week pm=month py=year.${def ? ` Default: "${def}".` : ""}`, enum: ["pd", "pw", "pm", "py"] } };
+    return { freshness: { type: "string", description: `Time filter: pd=past day pw=week pm=month py=year any=none (historical). Pass pd/pw/pm/py whenever the user asks for latest/current/recent results ("today", "this week", "latest", current year); omit or "any" for timeless or historical questions. The response footer echoes the filter that was applied.${def ? ` Default: "${def}".` : ""}`, enum: ["pd", "pw", "pm", "py", "any"] } };
   }
   static safesearch() {
     return { safesearch: { type: "string", description: '"off" | "moderate" | "strict". Default: "moderate".', enum: ["off", "moderate", "strict"], default: "moderate" } };
@@ -1849,7 +2004,7 @@ var SearchTools = class {
   static webSearch() {
     return {
       name: "search_web",
-      description: "Google web search via Serper API. Returns organic results plus Knowledge Graph, Answer Box, People Also Ask, and related searches.",
+      description: "Google web search via Serper API. Returns organic results plus Knowledge Graph, Answer Box, People Also Ask, and related searches. For latest/current results pass freshness (e.g. py=past year). For a synthesized answer in one call, prefer search_rag_context (fast) or deep_research (thorough) instead of search\u2192scrape chains.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1860,7 +2015,6 @@ var SearchTools = class {
           ...this.safesearch(),
           ...this.verbosityParam(),
           autocorrect: { type: "boolean", description: "Auto-correct spelling. Default: true.", default: true },
-          summary: { type: "boolean", description: "Request Serper AI summary. Default: false.", default: false },
           page: { type: "number", description: "Page number for pagination. Default: 1.", minimum: 1, default: 1 },
           ...this.linkResolution()
         },
@@ -1880,9 +2034,8 @@ var SearchTools = class {
           ...this.localeParams(),
           ...this.safesearch(),
           ...this.verbosityParam(),
-          size: { type: "string", description: "Image size filter.", enum: ["small", "medium", "large", "xlarge"] },
-          orientation: { type: "string", description: "Aspect filter (client-side via W\xD7H).", enum: ["landscape", "portrait", "square"] },
-          color: { type: "string", description: "Dominant color filter (e.g. blue, red, green)." },
+          size: { type: "string", description: "Filter by pixel dimensions, client-side via W\xD7H (longest side: small <640, medium <1280, large <2000, xlarge \u22652000; images without dimensions are kept).", enum: ["small", "medium", "large", "xlarge"] },
+          orientation: { type: "string", description: "Aspect filter, client-side via W\xD7H (images without dimensions are kept).", enum: ["landscape", "portrait", "square"] },
           site: { type: "string", description: "Restrict to domain (e.g. dribbble.com, behance.net, unsplash.com)." },
           layout: { type: "string", description: "list (default) or gallery (renderable ![thumb] grid).", enum: ["list", "gallery"], default: "list" },
           ...this.linkResolution()
@@ -1912,7 +2065,7 @@ var SearchTools = class {
   static newsSearch() {
     return {
       name: "search_news",
-      description: "Google News search via Serper API. Returns headlines, sources, and publication dates.",
+      description: 'Google News search via Serper API. Returns headlines, sources, and publication dates. Defaults to past day \u2014 pass freshness="any" for historical news, or use after:/before: operators in the query for date ranges.',
       inputSchema: {
         type: "object",
         properties: {
@@ -1946,7 +2099,7 @@ var SearchTools = class {
   static placesSearch() {
     return {
       name: "search_places",
-      description: "Google Places / Maps search via Serper API. Returns local businesses with address, phone, full 7-day hours, ratings, GPS + Directions links. Always rich \u2014 never compacted.",
+      description: "Google Places / Maps search via Serper API. Returns local businesses with address, phone, full 7-day hours, ratings, GPS + Directions links. Rich by default; verbosity=compact keeps only title/rating/address.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1954,7 +2107,6 @@ var SearchTools = class {
           ...this.numResults(20, 5),
           ...this.localeParams(),
           ...this.verbosityParam(),
-          open_now_only: { type: "boolean", description: "Filter to currently-open places (client-side via hours text). Default: false.", default: false },
           min_rating: { type: "number", description: "Minimum rating filter (e.g. 4.5).", minimum: 0, maximum: 5 },
           sort_by: { type: "string", description: "Sort results.", enum: ["rating", "reviews"] }
         },
@@ -2012,7 +2164,7 @@ var SearchTools = class {
   static scrapeTool() {
     return {
       name: "scrape",
-      description: "Fetch and extract the full contents of a single URL via Serper Scrape API. Returns the page content as markdown (or plain text). Use after a search to read a promising page in full. Costs ~2 credits per page.",
+      description: "Fetch and extract the full contents of a single URL via Serper Scrape API. Returns the page content as markdown (or plain text). Costs 2 credits per page (every scrape; include_images does not change the price \u2014 chains multiply). For synthesized answers prefer search_rag_context or deep_research over scraping many pages.",
       inputSchema: {
         type: "object",
         properties: {
@@ -2124,7 +2276,7 @@ var SearchTools = class {
   static resolveLinksTool() {
     return {
       name: "resolve_links",
-      description: "Turn google.com/goto redirect links from a recent search into real URLs via Serper /resolve (free, 0 credits). Pass the search_id a search result asked for, or a list of goto links. Right after a search one call takes ~20\u201330 s. Links not ready yet stay goto links; Serper then suggests a wait (often 90 s), which is only honoured if it fits in max_wait_seconds \u2014 otherwise call again later.",
+      description: "Turn google.com/goto redirect links from a recent search into real URLs via Serper /resolve (free, 0 credits). Requires exactly one of: search_id, or links. Pass the search_id a search result asked for, or a list of goto links. Right after a search one call takes ~20\u201330 s. Links not ready yet stay goto links; Serper then suggests a wait (often 90 s), which is only honoured if it fits in max_wait_seconds \u2014 otherwise call again later.",
       inputSchema: {
         type: "object",
         properties: {
@@ -2137,9 +2289,12 @@ var SearchTools = class {
     };
   }
   static validateArgs(toolName, args) {
+    if (toolName === "search_maps" || toolName === "search_reviews" || toolName === "search_lens") return;
     const tool = this.getAllTools().find((t) => t.name === toolName);
     if (!tool) throw new ValidationError(`Unknown tool: ${toolName}`);
-    if (typeof args !== "object" || args === null) throw new ValidationError("Arguments must be an object");
+    if (typeof args !== "object" || args === null || Array.isArray(args)) {
+      throw new ValidationError("Arguments must be an object");
+    }
     for (const key of tool.inputSchema.required) {
       if (!(key in args)) throw new ValidationError(`Missing required parameter: ${key}`);
     }
@@ -2191,10 +2346,44 @@ var SearchTools = class {
       const n = Number(a["min_rating"]);
       if (!Number.isFinite(n) || n < 0 || n > 5) throw new ValidationError("min_rating must be 0-5");
     }
-    if (a["type"] !== void 0 && toolName === "search") {
+    if (a["type"] !== void 0 && toolName === "search" && typeof a["type"] === "string") {
       const t = a["type"].toLowerCase();
       if (!["web", "images", "videos", "news", "shopping", "places", "scholar", "patents", "autocomplete"].includes(t)) {
         throw new ValidationError("type must be web|images|videos|news|shopping|places|scholar|patents|autocomplete");
+      }
+    }
+    for (const [key, rawSchema] of Object.entries(tool.inputSchema.properties)) {
+      if (!(key in a) || a[key] === void 0) continue;
+      const schema = rawSchema;
+      const value = a[key];
+      if (schema.enum && !schema.enum.includes(value)) {
+        throw new ValidationError(`${key} must be one of: ${schema.enum.join("|")}`);
+      }
+      if (schema.type === "string" && typeof value !== "string") {
+        throw new ValidationError(`${key} must be a string`);
+      }
+      if (schema.type === "number") {
+        if (typeof value !== "number" || !Number.isFinite(value)) {
+          throw new ValidationError(`${key} must be a number`);
+        }
+        if (schema.minimum !== void 0 && value < schema.minimum) {
+          throw new ValidationError(`${key} must be >= ${schema.minimum}`);
+        }
+        if (schema.maximum !== void 0 && value > schema.maximum) {
+          throw new ValidationError(`${key} must be <= ${schema.maximum}`);
+        }
+      }
+      if (schema.type === "boolean" && typeof value !== "boolean") {
+        throw new ValidationError(`${key} must be a boolean`);
+      }
+      if (schema.type === "array") {
+        if (!Array.isArray(value)) throw new ValidationError(`${key} must be an array`);
+        if (schema.minItems !== void 0 && value.length < schema.minItems) {
+          throw new ValidationError(`${key} must contain at least ${schema.minItems} item${schema.minItems === 1 ? "" : "s"}`);
+        }
+        if (schema.maxItems !== void 0 && value.length > schema.maxItems) {
+          throw new ValidationError(`${key} must contain at most ${schema.maxItems} items`);
+        }
       }
     }
   }
@@ -2209,11 +2398,11 @@ init_RAGContext();
 // src/tools/BatchSearch.ts
 init_Concurrency();
 var MAX_CONCURRENCY = RESEARCH_CONCURRENCY;
-async function runBatchSearch(queries, options, api) {
+async function runBatchSearch(queries, options, router) {
   const numResults = Math.min(20, Math.max(1, Math.floor(Number(options.num_results)) || 5));
   const perQuery = await mapWithConcurrency(queries, MAX_CONCURRENCY, async (query) => {
     try {
-      const data = await api.search(query, "web", {
+      const data = await router.search(query, "web", {
         num_results: numResults,
         country: options.country,
         search_lang: options.search_lang,
@@ -2278,11 +2467,11 @@ init_errors();
 init_Metrics();
 
 // package.json
-var version = "4.0.1";
+var version = "4.1.0";
 
 // src/server/SerperMCPServer.ts
 if (!globalThis.crypto) {
-  globalThis.crypto = import_node_crypto2.webcrypto;
+  globalThis.crypto = import_node_crypto3.webcrypto;
 }
 var SEARCH_TYPE_MAP = {
   search: "web",
@@ -2300,23 +2489,46 @@ var SEARCH_TYPE_MAP = {
 function isAuthorized(authorization, token) {
   if (!token) return true;
   if (!authorization) return false;
-  const expected = `Bearer ${token}`;
-  const a = Buffer.from(authorization, "utf8");
-  const b = Buffer.from(expected, "utf8");
-  if (a.length !== b.length) return false;
-  try {
-    return (0, import_node_crypto2.timingSafeEqual)(a, b);
-  } catch {
-    return false;
-  }
+  const match = /^Bearer[ \t]+(.+)$/i.exec(authorization);
+  if (!match) return false;
+  const a = (0, import_node_crypto3.createHash)("sha256").update(match[1], "utf8").digest();
+  const b = (0, import_node_crypto3.createHash)("sha256").update(token, "utf8").digest();
+  return (0, import_node_crypto3.timingSafeEqual)(a, b);
+}
+function sanitizeErrorMessage(message) {
+  const noHtml = message.replace(/<[^>]{1,200}>/g, " ").replace(/\s+/g, " ").trim();
+  const redacted = noHtml.replace(/([?&](?:key|api[_-]?key|token|access_token)=)[^\s&"']+/gi, "$1[redacted]").replace(/\b(Bearer)\s+[A-Za-z0-9._-]{8,}/gi, "$1 [redacted]").replace(/\bsk-[A-Za-z0-9._-]{8,}/g, "sk-[redacted]");
+  return redacted.length > 300 ? `${redacted.slice(0, 300)}...` : redacted;
+}
+var LOOPBACK_HOST_VALUES = /* @__PURE__ */ new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+function hostAllowedSet(bindHost) {
+  const extras = (process.env.SERPER_MCP_ALLOWED_HOSTS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const bind = (bindHost ?? "").trim().toLowerCase();
+  const loopbackBind = LOOPBACK_HOST_VALUES.has(bind);
+  if (!loopbackBind && extras.length === 0) return null;
+  const allowed = /* @__PURE__ */ new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+  if (bind && !["0.0.0.0", "::", "[::]", "*"].includes(bind)) allowed.add(bind);
+  for (const e of extras) allowed.add(e);
+  return allowed;
+}
+function isAllowedHostHeader(hostHeader, allowed) {
+  const raw = Array.isArray(hostHeader) ? hostHeader[0] : hostHeader;
+  if (!raw) return false;
+  const h = raw.trim().toLowerCase();
+  if (allowed.has(h)) return true;
+  const stripped = h.replace(/:\d+$/, "");
+  return stripped !== h && allowed.has(stripped);
 }
 var SerperMCPServer = class {
   constructor(options = {}) {
+    const envPort = parseInt(process.env.SERPER_MCP_PORT || "8080", 10);
+    const candidate = Number.isInteger(options.port) ? options.port : envPort;
+    const port = Number.isInteger(candidate) && candidate > 0 && candidate <= 65535 ? candidate : 8080;
     this.config = {
       apiKey: options.apiKey || process.env.SERPER_API_KEY || "",
       transport: options.transport || process.env.SERPER_MCP_TRANSPORT || "stdio",
-      port: options.port || parseInt(process.env.SERPER_MCP_PORT || "8080", 10),
-      host: options.host || process.env.SERPER_MCP_HOST || "0.0.0.0",
+      port,
+      host: options.host || process.env.SERPER_MCP_HOST || "127.0.0.1",
       logLevel: options.logLevel || process.env.SERPER_MCP_LOG_LEVEL || "info",
       authToken: options.authToken || process.env.SERPER_MCP_AUTH_TOKEN || void 0
     };
@@ -2342,105 +2554,105 @@ var SerperMCPServer = class {
     server.setRequestHandler(import_types.ListToolsRequestSchema, async () => ({
       tools: SearchTools.getAllTools()
     }));
-    server.setRequestHandler(import_types.CallToolRequestSchema, async (req) => {
-      setRequestId((0, import_node_crypto2.randomUUID)().slice(0, 8));
-      const { name, arguments: args } = req.params;
-      const knownTool = name in SEARCH_TYPE_MAP || name === "deep_research" || name === "search_rag_context" || name === "scrape" || name === "search_many" || name === "search_maps" || name === "search_reviews" || name === "search_lens" || name === "resolve_links";
-      if (!knownTool) throw new import_types.McpError(import_types.ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
-      try {
-        SearchTools.validateArgs(name, args);
-        const a = args;
-        if (name === "resolve_links") {
-          const text = await this.links.resolveLinksTool(a);
-          return { content: [{ type: "text", text }] };
-        }
-        if (name === "scrape") {
-          const url = a["url"];
-          const maxChars = Math.min(2e5, Math.max(1e3, Math.floor(Number(a["max_chars"])) || 5e4));
-          const data = await this.api.scrape(url, {
-            includeMarkdown: a["include_markdown"] ?? true,
-            includeImages: a["include_images"] ?? false,
-            includeLinks: a["include_links"] ?? false,
-            includeVideos: a["include_videos"] ?? false
-          });
-          const text = ResultFormatter.formatScrape(data, url, maxChars);
-          return { content: [{ type: "text", text }] };
-        }
-        if (name === "search_many") {
-          const text = await runBatchSearch(
-            a["queries"],
-            {
-              num_results: a["num_results"] ?? 5,
-              country: a["country"] ?? "US",
-              search_lang: a["search_lang"] ?? "en",
-              ui_lang: a["ui_lang"] ?? "en",
-              freshness: a["freshness"],
-              safesearch: a["safesearch"] ?? "moderate"
-            },
-            this.api
-          );
-          return { content: [{ type: "text", text }] };
-        }
-        if (name === "deep_research") {
-          const result = await runDeepResearch(
-            a["query"],
-            a["depth"] ?? "standard",
-            a["country"] ?? "US",
-            this.api
-          );
-          const header = [
-            `## \u{1F52C} Deep Research Report`,
-            `**Query:** ${result.query}`,
-            `**Depth:** ${result.depth} | **Sources:** ${result.sourceCount} | **LLM:** ${result.model} (${result.provider})`,
-            `**Sub-queries explored:**`,
-            ...result.subQueries.map((q, i) => `${i + 1}. ${q}`),
-            "",
-            "---",
-            ""
-          ].join("\n");
-          return { content: [{ type: "text", text: header + result.report + deepResearchLinkFooter(result) }] };
-        }
-        if (name === "search_rag_context") {
-          const text = await buildRAGContext(
-            a["query"],
-            {
-              num_results: a["num_results"] ?? 10,
-              country: a["country"] ?? "US",
-              freshness: a["freshness"],
-              max_chunk_words: a["max_chunk_words"] ?? 200,
-              include_paa: a["include_paa"] ?? true,
-              output_format: a["output_format"] ?? "json",
-              link_resolution: a["link_resolution"] ?? defaultLinkMode()
-            },
-            this.api,
-            this.links
-          );
-          return { content: [{ type: "text", text }] };
-        }
-        if (name === "search_maps" || name === "search_reviews" || name === "search_lens") {
-          const hint = name === "search_maps" ? "Use search_places instead \u2014 same Serper places index with address/phone/hours/GPS." : name === "search_reviews" ? 'Use search_places (ratings + review counts) or search_web with "<place> reviews".' : "Use search_images with a site filter (e.g. site=dribbble.com) for visual discovery.";
-          return { content: [{ type: "text", text: `## \u26A0\uFE0F ${name} is not a separate Serper endpoint
+    server.setRequestHandler(
+      import_types.CallToolRequestSchema,
+      (req) => withRequestId((0, import_node_crypto3.randomUUID)().slice(0, 8), async () => {
+        const { name, arguments: args } = req.params;
+        const knownTool = name in SEARCH_TYPE_MAP || name === "deep_research" || name === "search_rag_context" || name === "scrape" || name === "search_many" || name === "search_maps" || name === "search_reviews" || name === "search_lens" || name === "resolve_links";
+        if (!knownTool) throw new import_types.McpError(import_types.ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+        try {
+          SearchTools.validateArgs(name, args);
+          const a = args;
+          if (name === "resolve_links") {
+            const text = await this.links.resolveLinksTool(a);
+            return { content: [{ type: "text", text }] };
+          }
+          if (name === "scrape") {
+            const url = a["url"];
+            const maxChars = Math.min(2e5, Math.max(1e3, Math.floor(Number(a["max_chars"])) || 5e4));
+            const data = await this.api.scrape(url, {
+              includeMarkdown: a["include_markdown"] ?? true,
+              includeImages: a["include_images"] ?? false,
+              includeLinks: a["include_links"] ?? false,
+              includeVideos: a["include_videos"] ?? false
+            });
+            const text = ResultFormatter.formatScrape(data, url, maxChars);
+            return { content: [{ type: "text", text }] };
+          }
+          if (name === "search_many") {
+            const text = await runBatchSearch(
+              a["queries"],
+              {
+                num_results: a["num_results"] ?? 5,
+                country: a["country"] ?? "US",
+                search_lang: a["search_lang"] ?? "en",
+                ui_lang: a["ui_lang"] ?? "en",
+                freshness: a["freshness"],
+                safesearch: a["safesearch"] ?? "moderate"
+              },
+              this.router
+            );
+            return { content: [{ type: "text", text }] };
+          }
+          if (name === "deep_research") {
+            const result = await runDeepResearch(
+              a["query"],
+              a["depth"] ?? "standard",
+              a["country"] ?? "US",
+              this.router
+            );
+            const header = [
+              `## \u{1F52C} Deep Research Report`,
+              `**Query:** ${result.query}`,
+              `**Depth:** ${result.depth} | **Sources:** ${result.sourceCount} | **LLM:** ${result.model} (${result.provider})`,
+              `**Sub-queries explored:**`,
+              ...result.subQueries.map((q, i) => `${i + 1}. ${q}`),
+              "",
+              "---",
+              ""
+            ].join("\n");
+            return { content: [{ type: "text", text: header + result.report + deepResearchLinkFooter(result) }] };
+          }
+          if (name === "search_rag_context") {
+            const text = await buildRAGContext(
+              a["query"],
+              {
+                num_results: a["num_results"] ?? 10,
+                country: a["country"] ?? "US",
+                freshness: a["freshness"],
+                max_chunk_words: a["max_chunk_words"] ?? 200,
+                include_paa: a["include_paa"] ?? true,
+                output_format: a["output_format"] ?? "json",
+                link_resolution: a["link_resolution"] ?? defaultLinkMode()
+              },
+              this.router,
+              this.links
+            );
+            return { content: [{ type: "text", text }] };
+          }
+          if (name === "search_maps" || name === "search_reviews" || name === "search_lens") {
+            const hint = name === "search_maps" ? "Use search_places instead \u2014 same Serper places index with address/phone/hours/GPS." : name === "search_reviews" ? 'Use search_places (ratings + review counts) or search_web with "<place> reviews".' : "Use search_images with a site filter (e.g. site=dribbble.com) for visual discovery.";
+            return { content: [{ type: "text", text: `## \u26A0\uFE0F ${name} is not a separate Serper endpoint
 
 ${hint}` }] };
-        }
-        let searchType = SEARCH_TYPE_MAP[name];
-        if (!searchType) throw new import_types.McpError(import_types.ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
-        if (name === "search" && typeof a["type"] === "string") {
-          const t = a["type"].toLowerCase();
-          if (t in SEARCH_TYPE_MAP || ["web", "images", "videos", "news", "shopping", "places", "scholar", "patents", "autocomplete"].includes(t)) {
-            searchType = t;
           }
+          let searchType = SEARCH_TYPE_MAP[name];
+          if (!searchType) throw new import_types.McpError(import_types.ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+          if (name === "search" && typeof a["type"] === "string") {
+            const t = a["type"].toLowerCase();
+            if (t in SEARCH_TYPE_MAP || ["web", "images", "videos", "news", "shopping", "places", "scholar", "patents", "autocomplete"].includes(t)) {
+              searchType = t;
+            }
+          }
+          return await this.runSearch(a, searchType);
+        } catch (err) {
+          if (err instanceof import_types.McpError) throw err;
+          const msg = sanitizeErrorMessage(err instanceof Error ? err.message : String(err));
+          if (err instanceof ValidationError) throw new import_types.McpError(import_types.ErrorCode.InvalidParams, msg);
+          throw new import_types.McpError(import_types.ErrorCode.InternalError, msg);
         }
-        return await this.runSearch(a, searchType);
-      } catch (err) {
-        if (err instanceof import_types.McpError) throw err;
-        const msg = err instanceof Error ? err.message : String(err);
-        if (err instanceof ValidationError) throw new import_types.McpError(import_types.ErrorCode.InvalidParams, msg);
-        throw new import_types.McpError(import_types.ErrorCode.InternalError, msg);
-      } finally {
-        setRequestId("");
-      }
-    });
+      })
+    );
     server.onerror = (err) => logger.error("[MCP error]", err);
   }
   async runSearch(args, searchType) {
@@ -2454,7 +2666,6 @@ ${hint}` }] };
       ui_lang: args["ui_lang"] ?? "en",
       freshness: args["freshness"] ?? (searchType === "news" ? "pd" : void 0),
       safesearch: args["safesearch"] ?? "moderate",
-      summary: args["summary"] ?? false,
       autocorrect: args["autocorrect"] ?? true,
       page: args["page"] ?? 1,
       verbosity,
@@ -2468,10 +2679,15 @@ ${hint}` }] };
       query = `site:${args["site"]} ${query}`;
     }
     const data = await this.router.search(query, searchType, opts);
+    const timeFilter = args["freshness"] ?? (searchType === "news" ? "pd" : void 0);
     const render = (d) => searchType === "places" ? this.formatPlacesWithFilters(d, numResults, args, maxChars) : ResultFormatter.format(d, numResults, searchType, {
       verbosity,
       maxChars,
-      snippetsOnly: opts.snippets_only
+      snippetsOnly: opts.snippets_only,
+      timeFilter,
+      layout: args["layout"],
+      size: args["size"],
+      orientation: args["orientation"]
     });
     const r = await this.links.apply(data, {
       mode: opts.link_resolution ?? "auto",
@@ -2486,7 +2702,8 @@ ${hint}` }] };
     const sortBy = args["sort_by"];
     const filtered = ResultFormatter.formatPlaces(data.places ?? [], numResults, {
       minRating: Number.isFinite(minRating) ? minRating : void 0,
-      sortBy: sortBy === "rating" || sortBy === "reviews" ? sortBy : void 0
+      sortBy: sortBy === "rating" || sortBy === "reviews" ? sortBy : void 0,
+      compact: args["verbosity"] === "compact"
     });
     const footer = `
 
@@ -2507,53 +2724,75 @@ ${hint}` }] };
    *   GET  /health  container/load-balancer health probe
    */
   async runHttp() {
+    const LOOPBACK_HOSTS = /* @__PURE__ */ new Set(["127.0.0.1", "::1", "localhost", "[::1]"]);
+    const insecureOptOut = ["1", "true", "yes"].includes(
+      (process.env.SERPER_MCP_INSECURE_NO_AUTH ?? "").toLowerCase()
+    );
+    if (!this.config.authToken && !LOOPBACK_HOSTS.has(this.config.host) && !insecureOptOut) {
+      throw new AuthError(
+        `Refusing to serve HTTP on ${this.config.host} without SERPER_MCP_AUTH_TOKEN. Set SERPER_MCP_AUTH_TOKEN, keep the default host 127.0.0.1 (reverse proxy), or set SERPER_MCP_INSECURE_NO_AUTH=true if authentication is handled elsewhere.`
+      );
+    }
     const MAX_BODY_BYTES = 256 * 1024;
-    const httpServer = (0, import_node_http.createServer)(async (req, res) => {
-      setRequestId((0, import_node_crypto2.randomUUID)().slice(0, 8));
-      try {
-        const contentLength = Number(req.headers["content-length"]);
-        if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
-          res.writeHead(413, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: `Request body too large (max ${MAX_BODY_BYTES} bytes)` }));
-          return;
-        }
-        const pathname = (req.url ?? "/").split("?")[0];
-        if (pathname === "/health") {
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({
-            status: "ok",
-            name: "serper-search-mcp",
-            version,
-            auth_required: Boolean(this.config.authToken),
-            uptime_s: Math.round(process.uptime()),
-            metrics: snapshot()
-          }));
-          return;
-        }
-        if (pathname === "/mcp") {
-          if (!isAuthorized(req.headers.authorization, this.config.authToken)) {
-            res.writeHead(401, { "Content-Type": "application/json", "WWW-Authenticate": "Bearer" });
-            res.end(JSON.stringify({ error: "Unauthorized \u2014 send Authorization: Bearer <SERPER_MCP_AUTH_TOKEN>" }));
+    const allowedHosts = hostAllowedSet(this.config.host);
+    const httpServer = (0, import_node_http.createServer)((req, res) => {
+      void withRequestId((0, import_node_crypto3.randomUUID)().slice(0, 8), async () => {
+        try {
+          const contentLength = Number(req.headers["content-length"]);
+          if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
+            res.writeHead(413, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: `Request body too large (max ${MAX_BODY_BYTES} bytes)` }));
             return;
           }
-          const server = this.buildServer();
-          const transport = new import_streamableHttp.StreamableHTTPServerTransport({ sessionIdGenerator: void 0 });
-          res.on("close", () => {
-            void transport.close();
-            void server.close();
-          });
-          await server.connect(transport);
-          await transport.handleRequest(req, res);
-          return;
+          const transferEncoding = req.headers["transfer-encoding"];
+          if (transferEncoding && String(transferEncoding).toLowerCase().includes("chunked") && !req.headers["content-length"]) {
+            res.writeHead(411, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Content-Length required (chunked bodies are not accepted)" }));
+            return;
+          }
+          const pathname = (req.url ?? "/").split("?")[0];
+          if (pathname === "/health") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              status: "ok",
+              name: "serper-search-mcp",
+              version,
+              auth_required: Boolean(this.config.authToken),
+              uptime_s: Math.round(process.uptime()),
+              metrics: snapshot()
+            }));
+            return;
+          }
+          if (pathname === "/mcp") {
+            if (allowedHosts && !isAllowedHostHeader(req.headers.host, allowedHosts)) {
+              res.writeHead(403, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({
+                error: "Forbidden: Host header not allowed (DNS rebinding protection). If you are behind a reverse proxy, set SERPER_MCP_ALLOWED_HOSTS=<your domain>."
+              }));
+              return;
+            }
+            if (!isAuthorized(req.headers.authorization, this.config.authToken)) {
+              res.writeHead(401, { "Content-Type": "application/json", "WWW-Authenticate": "Bearer" });
+              res.end(JSON.stringify({ error: "Unauthorized \u2014 send Authorization: Bearer <SERPER_MCP_AUTH_TOKEN>" }));
+              return;
+            }
+            const server = this.buildServer();
+            const transport = new import_streamableHttp.StreamableHTTPServerTransport({ sessionIdGenerator: void 0 });
+            res.on("close", () => {
+              void transport.close();
+              void server.close();
+            });
+            await server.connect(transport);
+            await transport.handleRequest(req, res);
+            return;
+          }
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Not found. MCP endpoint: POST /mcp" }));
+        } catch (err) {
+          if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: sanitizeErrorMessage(err instanceof Error ? err.message : String(err)) }));
         }
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Not found. MCP endpoint: POST /mcp" }));
-      } catch (err) {
-        if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
-      } finally {
-        setRequestId("");
-      }
+      });
     });
     await new Promise((resolve, reject) => {
       httpServer.once("error", reject);
@@ -2578,8 +2817,12 @@ ${hint}` }] };
       return;
     }
     const server = this.buildServer();
-    process.on("SIGINT", () => server.close().then(() => process.exit(0)));
-    process.on("SIGTERM", () => server.close().then(() => process.exit(0)));
+    const shutdownStdio = () => {
+      server.close().then(() => process.exit(0)).catch(() => process.exit(1));
+      setTimeout(() => process.exit(0), 1e4).unref();
+    };
+    process.on("SIGINT", shutdownStdio);
+    process.on("SIGTERM", shutdownStdio);
     await server.connect(new import_stdio.StdioServerTransport());
     logger.info(`Serper Search MCP Server v${version} \u2014 SMLabs AI`);
   }
@@ -2594,6 +2837,8 @@ var KNOWN_ENV = /* @__PURE__ */ new Set([
   "SERPER_MCP_HOST",
   "SERPER_MCP_AUTH_TOKEN",
   "SERPER_MCP_LOG_LEVEL",
+  "SERPER_MCP_INSECURE_NO_AUTH",
+  "SERPER_MCP_ALLOWED_HOSTS",
   // tuning (read lazily via numberFromEnv)
   "SERPER_CACHE_TTL_MS",
   "SERPER_CACHE_MAX",
@@ -2602,6 +2847,8 @@ var KNOWN_ENV = /* @__PURE__ */ new Set([
   "SERPER_RETRY_BASE_MS",
   "SERPER_LLM_TIMEOUT_MS",
   "SERPER_LLM_RETRIES",
+  "SERPER_CACHE_PERSIST",
+  "SERPER_CACHE_DIR",
   // Google redirect-link resolution
   "SERPER_LINK_RESOLUTION",
   "SERPER_RESOLVE_MAX_WAIT",
@@ -2635,6 +2882,10 @@ function validateEnv(env = process.env) {
   if (linkMode && !["auto", "all", "none"].includes(linkMode)) {
     warnings.push(`SERPER_LINK_RESOLUTION must be auto|all|none (got "${linkMode}") \u2014 falling back to auto`);
   }
+  const persist = env.SERPER_CACHE_PERSIST;
+  if (persist !== void 0 && persist !== "" && !["true", "1", "yes", "false", "0", "no"].includes(persist.toLowerCase())) {
+    warnings.push(`SERPER_CACHE_PERSIST must be true|false (got "${persist}") \u2014 disk persistence stays off`);
+  }
   const order = env.SEARCH_PROVIDER_ORDER;
   if (order) {
     const dropped = order.split(",").map((s) => s.trim()).filter((s) => s && !PROVIDER_NAMES.includes(s));
@@ -2653,13 +2904,19 @@ function parseArgs() {
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
     if (tok.startsWith("--")) {
-      const key = tok.slice(2);
+      const body = tok.slice(2);
+      const eq = body.indexOf("=");
+      if (eq >= 0) {
+        flags[body.slice(0, eq)] = body.slice(eq + 1);
+        continue;
+      }
       const next = argv[i + 1];
-      if (next !== void 0 && !next.startsWith("--")) {
-        flags[key] = next;
+      const takesValue = next !== void 0 && (!next.startsWith("-") || /^-\d/.test(next));
+      if (takesValue) {
+        flags[body] = next;
         i++;
       } else {
-        flags[key] = "true";
+        flags[body] = "true";
       }
     } else {
       positional.push(tok);
@@ -2701,7 +2958,7 @@ async function runCliCommand(cmd, rest, flags) {
   if (cmd === "search" || cmd === "scrape" || cmd === "research" || cmd === "rag") {
     const query = rest.join(" ").trim();
     if (!query && cmd !== "scrape") {
-      console.error(`Usage: serper-search-mcp ${cmd} "<query>" [--compact --limit 5 --provider auto --json]`);
+      console.error(`Usage: serper-search-mcp ${cmd} "<query>" [--compact --limit 5 --provider auto --freshness pd|pw|pm|py|any --type web|news|... --json]`);
       process.exit(1);
     }
     if (cmd === "search") {
@@ -2711,9 +2968,15 @@ async function runCliCommand(cmd, rest, flags) {
         console.error(`Invalid search type: "${type}". Must be one of: ${validTypes.join(", ")}`);
         process.exit(1);
       }
-      const data = await router.search(query, type, { num_results: limit, provider });
+      const validFreshness = ["pd", "pw", "pm", "py", "any"];
+      if (flags["freshness"] && !validFreshness.includes(flags["freshness"])) {
+        console.error(`Invalid --freshness: "${flags["freshness"]}". Must be one of: ${validFreshness.join(", ")}`);
+        process.exit(1);
+      }
+      const freshness = flags["freshness"] ?? (type === "news" ? "pd" : void 0);
+      const data = await router.search(query, type, { num_results: limit, provider, freshness });
       if (asJson) console.log(JSON.stringify(data, null, 2));
-      else console.log(ResultFormatter2.format(data, limit, type, { verbosity }));
+      else console.log(ResultFormatter2.format(data, limit, type, { verbosity, timeFilter: freshness }));
       return;
     }
     if (cmd === "scrape") {
@@ -2727,13 +2990,13 @@ async function runCliCommand(cmd, rest, flags) {
     if (cmd === "rag") {
       const { buildRAGContext: buildRAGContext2 } = await Promise.resolve().then(() => (init_RAGContext(), RAGContext_exports));
       const format = flags["format"] === "text" ? "text" : "json";
-      console.log(await buildRAGContext2(query, { num_results: limit, output_format: format }, api));
+      console.log(await buildRAGContext2(query, { num_results: limit, output_format: format }, router));
       return;
     }
     if (cmd === "research") {
       const { runDeepResearch: runDeepResearch2 } = await Promise.resolve().then(() => (init_DeepResearch(), DeepResearch_exports));
       const depth = flags["depth"] ?? "basic";
-      const result = await runDeepResearch2(query, depth, "US", api);
+      const result = await runDeepResearch2(query, depth, "US", router);
       if (asJson) console.log(JSON.stringify(result, null, 2));
       else console.log(result.report);
       return;
@@ -2756,6 +3019,8 @@ Usage (MCP server):
 
 Usage (CLI \u2014 dev power-tool):
   npx serper-search-mcp search "react server components" --compact --limit 5
+  npx serper-search-mcp search "latest AI news" --freshness pd --limit 3   # past day (any: pd|pw|pm|py|any)
+  npx serper-search-mcp search "AI news" --type news                       # news defaults to past day
   npx serper-search-mcp scrape https://example.com --max-chars 8000
   npx serper-search-mcp research "RAG limits" --depth basic
   npx serper-search-mcp rag "transformer" --format json
@@ -2765,11 +3030,13 @@ Options:
   --api-key <key>          Serper API key (or set SERPER_API_KEY env)
   --transport <stdio|http> Transport mode (default: stdio)
   --port <number>          HTTP port (default: 8080)
-  --host <string>          HTTP host (default: 0.0.0.0)
+  --host <string>          HTTP host (default: 127.0.0.1; non-loopback requires --auth-token)
   --auth-token <token>     Require bearer token on HTTP /mcp (or SERPER_MCP_AUTH_TOKEN)
   --log-level <level>      error | warn | info | debug | silent (default: info)
   --compact                CLI: compact output (~800 tokens)
   --limit <n>              CLI: results 1-20 (default: 5)
+  --freshness <f>          CLI: time filter pd=past day|pw=week|pm=month|py=year|any=none (news defaults to pd)
+  --type <t>               CLI: web|images|videos|news|shopping|places|scholar|patents|autocomplete (default: web)
   --provider <name>        CLI: auto|serper|tavily|brave|exa|firecrawl|all
   --json                   CLI: raw JSON output
   --help                   Show this help
@@ -2779,7 +3046,12 @@ Environment variables:
   SERPER_MCP_TRANSPORT     stdio | http
   SERPER_MCP_PORT          HTTP port
   SERPER_MCP_HOST          HTTP host
-  SERPER_MCP_AUTH_TOKEN    Optional bearer token required on HTTP /mcp
+  SERPER_MCP_AUTH_TOKEN    Bearer token for HTTP /mcp (required off-loopback unless
+                         SERPER_MCP_INSECURE_NO_AUTH=true)
+  SERPER_MCP_ALLOWED_HOSTS Comma-separated extra Host values accepted on /mcp when
+                         bound to loopback (reverse proxies forwarding their domain)
+  SERPER_CACHE_PERSIST     true = persist search/scrape cache to disk (default: off)
+  SERPER_CACHE_DIR         Cache directory (default: ~/.serper-cache)
   SERPER_MCP_LOG_LEVEL     error | warn | info | debug | silent
   SERPER_CACHE_TTL_MS      Search-result cache TTL (default 600000, 0 = disabled)
   SERPER_TIMEOUT_MS        Per-request timeout (default 30000)
@@ -2807,7 +3079,7 @@ Tools provided:
   search_patents     Google Patents
   autocomplete       Query completions
   scrape             Fetch full page content as markdown
-  search_many        Batch: 1\u201310 parallel searches with dedupe (max_credits guard)
+  search_many        Batch: 1\u201310 parallel searches with URL dedupe across queries
   deep_research      Multi-step research: sub-queries, parallel search, LLM report (basic 3cr / standard 5cr / deep 8cr)
   search_rag_context Clean chunked text + metadata for RAG/embedding pipelines
   resolve_links      Turn google.com/goto redirect links into real URLs (free)

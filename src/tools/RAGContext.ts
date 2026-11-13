@@ -7,7 +7,7 @@
  * No LLM required — pure formatting.
  */
 
-import { SerperAPI } from '../api/SerperAPI.js';
+import { ProviderRouter } from '../api/providers/Router.js';
 import { OrganicResult, SerperAPIResponse } from '../types/index.js';
 import { LinkMode, UnresolvedState, countGotoLinks, unresolvedNote } from '../utils/LinkResolution.js';
 import type { LinkResolver } from './ResolveLinks.js';
@@ -109,13 +109,15 @@ function paaChunks(data: SerperAPIResponse, startIndex: number): RAGChunk[] {
   if (!data.peopleAlsoAsk?.length) return [];
 
   return data.peopleAlsoAsk.slice(0, 4).map((paa, i) => {
-    const text = `Q: ${paa.question} A: ${cleanText(paa.snippet)}`;
+    // Serper PAA entries can be question-only — never pass undefined to cleanText/URL.
+    const answer = paa.snippet ? cleanText(paa.snippet) : '';
+    const text = answer ? `Q: ${paa.question} A: ${answer}` : `Q: ${paa.question}`;
     return {
       chunk_index:  startIndex + i,
       source_index: 0,              // 0 = PAA, not an organic result
       title:        paa.question,
-      url:          paa.link,
-      domain:       extractDomain(paa.link),
+      url:          paa.link ?? '',
+      domain:       paa.link ? extractDomain(paa.link) : '',
       date:         null,
       text,
       word_count:   text.split(/\s+/).length,
@@ -131,13 +133,13 @@ export async function buildRAGContext(
   options: {
     num_results?: number;
     country?: string;
-    freshness?: 'pd' | 'pw' | 'pm' | 'py';
+    freshness?: 'pd' | 'pw' | 'pm' | 'py' | 'any';
     max_chunk_words?: number;
     include_paa?: boolean;
     output_format?: 'json' | 'text';
     link_resolution?: LinkMode;
   },
-  api: SerperAPI,
+  router: ProviderRouter,
   links?: LinkResolver
 ): Promise<string> {
   const {
@@ -153,7 +155,7 @@ export async function buildRAGContext(
   // Clamp chunk size: guards against 0/negative values looping forever
   const chunkWords = Math.min(1000, Math.max(50, Math.floor(Number(max_chunk_words)) || 200));
 
-  const data = await api.search(query, 'web', { num_results, country, freshness, autocorrect: true, link_resolution });
+  const data = await router.search(query, 'web', { num_results, country, freshness, autocorrect: true, link_resolution });
 
   const render = (d: SerperAPIResponse, state: UnresolvedState) =>
     renderRAG(query, d, chunkWords, include_paa, output_format, state);
